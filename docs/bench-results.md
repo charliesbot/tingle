@@ -1,19 +1,17 @@
-# Rust vs Go bench results
+# Bench results
 
-Measured: 2026-04-19T05:25:57Z
+Measured: 2026-04-19T16:25:53Z
 Host: Darwin 25.4.0 arm64
+Binary: rust/target/release/tingle
 
-## Binary sizes (stripped release)
+## Binary size (stripped release)
 
-| Binary | Size |
-| --- | --- |
-| Go (./tingle) | 24 MB |
-| Rust (rust/target/release/tingle) | 12 MB |
+12 MB
 
 ## Per-repo results
 
-| Repo | Go wall-clock | Rust wall-clock | Speedup | Go peak RSS | Rust peak RSS |
-| --- | --- | --- | --- | --- | --- |
-| advent-of-code | 0.893s | 0.061s | 14.74× | 876 MB | 99 MB |
-| charliesbot.dev | 0.124s | 0.041s | 3.00× | 73 MB | 51 MB |
-| one | 0.503s | 0.060s | 8.38× | 145 MB | 90 MB |
+| Repo | Files | Wall-clock | Peak RSS |
+| --- | --- | --- | --- |
+| advent-of-code | 91 | 71 ms | 98 MB |
+| charliesbot.dev | 32 | 49 ms | 51 MB |
+| one | 167 | 64 ms | 67 MB |
