@@ -193,8 +193,7 @@ fn build_legend(
     // content). `--compact` drops F-section defs too. In both cases the
     // def-kinds legend would advertise markers that never appear, which
     // is the exact UX bug this section was designed to prevent.
-    let has_defs =
-        !opts.compact && files_rendered && files.iter().any(|f| !f.defs.is_empty());
+    let has_defs = !opts.compact && files_rendered && files.iter().any(|f| !f.defs.is_empty());
     if has_defs {
         let mut kinds: Vec<&str> = Vec::new();
         let iter_defs = || files.iter().flat_map(|f| f.defs.iter());
@@ -279,9 +278,15 @@ fn build_body(
                 String::new()
             } else {
                 // --compact tightens to a single caller; default shows 3.
+                // Caller paths are architecture labels (the utility itself
+                // is the anchor) — compact Gradle boilerplate for tokens.
                 let cap = if opts.compact { 1 } else { 3 };
                 let max_show = cap.min(cs.len());
-                let mut s = format!("  ← {}", cs[..max_show].join(" "));
+                let short: Vec<String> = cs[..max_show]
+                    .iter()
+                    .map(|c| compact_label_path(c))
+                    .collect();
+                let mut s = format!("  ← {}", short.join(" "));
                 if cs.len() > max_show {
                     s.push_str(&format!(" (+{} more)", cs.len() - max_show));
                 }
@@ -292,13 +297,19 @@ fn build_body(
         b.push('\n');
     }
 
-    // Modules
+    // Modules. Dirs here are architecture *labels*, never anchors — the
+    // agent never Reads a directory — so strip Gradle source-root
+    // boilerplate for token efficiency.
     if !dir_edges.is_empty() {
         b.push_str("## Modules\n");
         let mut srcs: Vec<&String> = dir_edges.keys().collect();
         srcs.sort();
         for src in srcs {
-            writeln!(b, "M {} -> {}", src, dir_edges[src].join(" ")).unwrap();
+            let dsts: Vec<String> = dir_edges[src]
+                .iter()
+                .map(|d| compact_label_path(d))
+                .collect();
+            writeln!(b, "M {} -> {}", compact_label_path(src), dsts.join(" ")).unwrap();
         }
         b.push('\n');
     }
@@ -403,6 +414,53 @@ fn parent_dir(p: &str) -> String {
     match p.rfind('/') {
         Some(i) => p[..i].to_string(),
         None => String::new(),
+    }
+}
+
+/// Compact a repo path for **label** use (M records, U caller lists) where
+/// the path is informational, not an anchor for downstream Read. Strips
+/// Gradle source-root boilerplate — `src/main/<lang>/com/<org>/<proj>` —
+/// producing `<module>:<tail>` form.
+///
+/// Anchors (F records, EP records, U record paths) must NOT use this —
+/// the agent needs the full path to Read the file.
+///
+/// Examples:
+///   `core/src/main/java/com/charliesbot/shared/core/constants` → `core:constants`
+///   `app/src/main/kotlin/com/x/one/data/Foo.kt` → `app:data/Foo.kt`
+///   `features/dashboard/app/src/main/java/com/x/one/features/dashboard/VM.kt`
+///     → `features/dashboard/app:features/dashboard/VM.kt` (no module-tail dedup
+///        when the module is nested)
+///   `src/components/Form.tsx` → `src/components/Form.tsx` (no change — no
+///     Gradle-style boilerplate)
+fn compact_label_path(p: &str) -> String {
+    let parts: Vec<&str> = p.split('/').collect();
+    let Some(src_i) = parts.iter().position(|s| *s == "src") else {
+        return p.to_string();
+    };
+    if src_i == 0 {
+        return p.to_string();
+    }
+    // After `src/`: skip variant (main/test/...), lang (java/kotlin/...),
+    // package-root chain (com/<org>/<proj>) — 5 segments in Android's
+    // canonical layout. Tolerate shorter paths by bailing out.
+    let skip = src_i + 1 + 5;
+    if skip > parts.len() {
+        return p.to_string();
+    }
+    let module = &parts[..src_i];
+    let tail = &parts[skip..];
+    // If the first tail segment duplicates the terminal module segment
+    // (common: module `complications` + package `.complications`), drop it.
+    let tail = match (module.last(), tail.first()) {
+        (Some(m), Some(t)) if m == t => &tail[1..],
+        _ => tail,
+    };
+    let module_str = module.join("/");
+    if tail.is_empty() {
+        module_str
+    } else {
+        format!("{}:{}", module_str, tail.join("/"))
     }
 }
 
@@ -672,6 +730,92 @@ mod tests {
             out.contains("# warning:"),
             "expected soft warning line, got:\n{}",
             &out[..out.len().min(400)]
+        );
+    }
+
+    #[test]
+    fn compact_label_path_examples() {
+        assert_eq!(
+            compact_label_path("core/src/main/java/com/x/shared/core/constants"),
+            "core:constants",
+            "dedup module-tail duplicate"
+        );
+        assert_eq!(
+            compact_label_path("core/src/main/kotlin/com/x/shared/core/domain/usecase"),
+            "core:domain/usecase",
+        );
+        assert_eq!(
+            compact_label_path("complications/src/main/java/com/x/onewearos/complications/MainComplicationService.kt"),
+            "complications:MainComplicationService.kt"
+        );
+        assert_eq!(
+            compact_label_path("features/dashboard/app/src/main/java/com/x/one/features/dashboard/TodayViewModel.kt"),
+            "features/dashboard/app:features/dashboard/TodayViewModel.kt",
+            "nested modules: no tail dedup (terminal segment is `app`, tail starts with `features`)"
+        );
+        // Non-Gradle paths pass through unchanged.
+        assert_eq!(
+            compact_label_path("src/components/Form.tsx"),
+            "src/components/Form.tsx"
+        );
+        assert_eq!(compact_label_path("README.md"), "README.md");
+        // Path that ends in module boilerplate returns the module alone.
+        assert_eq!(
+            compact_label_path("core/src/main/java/com/x/shared/core"),
+            "core"
+        );
+    }
+
+    #[test]
+    fn modules_section_uses_compact_paths() {
+        let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+        edges.insert(
+            "core/src/main/java/com/x/shared/core/domain".into(),
+            vec!["core/src/main/java/com/x/shared/core/models".into()],
+        );
+        let opts = opts_minimal();
+        let out = render(&[], &[], &[], &edges, &HashMap::new(), &[], &opts);
+        assert!(
+            out.contains("M core:domain -> core:models"),
+            "expected compact module paths:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn utility_callers_use_compact_paths() {
+        let util = FileIndex {
+            path: "core/src/main/java/com/x/shared/core/models/Foo.kt".into(),
+            lang: "kt".into(),
+            in_deg: 2,
+            ..Default::default()
+        };
+        let mut callers = HashMap::new();
+        callers.insert(
+            util.path.clone(),
+            vec!["app/src/main/java/com/x/one/services/A.kt".into()],
+        );
+        let files = [util];
+        let opts = opts_minimal();
+        let out = render(
+            &files,
+            &[],
+            &[&files[0]],
+            &HashMap::new(),
+            &callers,
+            &[],
+            &opts,
+        );
+        assert!(
+            out.contains("← app:services/A.kt"),
+            "expected compact caller path:\n{}",
+            out
+        );
+        // The U record's own path must stay full — it's an anchor.
+        assert!(
+            out.contains("U core/src/main/java/com/x/shared/core/models/Foo.kt"),
+            "{}",
+            out
         );
     }
 
