@@ -87,13 +87,19 @@ pub struct EntryPointsOpts<'a> {
 }
 
 /// Return files ranked by the entry-point heuristic, capped at `max_eps`
-/// with score > 0.
+/// with score > 0. Test-tagged files are excluded — they're probes, not
+/// entries (feedback from multiple real-use agents: test files kept
+/// outranking production ViewModels/Services with only slightly higher
+/// out_deg).
 pub fn entry_points<'a>(files: &'a [FileIndex], opts: EntryPointsOpts) -> Vec<&'a FileIndex> {
     let manifest_set: HashSet<&str> = opts.manifest_ep.iter().map(|s| s.as_str()).collect();
 
     let mut scored: Vec<(i32, &FileIndex)> = Vec::new();
     for f in files {
         if f.lang.is_empty() || f.defs.is_empty() {
+            continue;
+        }
+        if f.tags.iter().any(|t| t == "test") {
             continue;
         }
         let s = score_one(f, opts.repo, &manifest_set);
@@ -256,6 +262,27 @@ mod tests {
         assert_eq!(u.len(), 2);
         assert_eq!(u[0].path, "src/a.ts");
         assert_eq!(u[1].path, "src/c.ts");
+    }
+
+    #[test]
+    fn entry_points_filter_test_tagged_files() {
+        let repo = Path::new("/nonexistent");
+        let mut real = fi("app/src/main/VM.kt", "kt");
+        real.out_deg = 10;
+        let mut test = fi("app/src/test/VMTest.kt", "kt");
+        test.out_deg = 15;
+        test.tags = vec!["test".into()];
+        let files = vec![real, test];
+        let eps = entry_points(
+            &files,
+            EntryPointsOpts {
+                repo,
+                manifest_ep: &[],
+                max_eps: 15,
+            },
+        );
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].path, "app/src/main/VM.kt");
     }
 
     #[test]

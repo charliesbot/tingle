@@ -46,6 +46,13 @@ struct Args {
     /// layer (manifests, entries, utilities, module graph).
     #[arg(long = "skeleton")]
     skeleton: bool,
+
+    /// Drop per-file def listings in the Files section (paths, imports,
+    /// tags only). Also tightens Utilities caller lists to 1 per record.
+    /// Aggressive trim for agents that want the architecture plus a file
+    /// listing without signature-level detail. Composes with --scope.
+    #[arg(long = "compact")]
+    compact: bool,
 }
 
 fn main() -> ExitCode {
@@ -118,6 +125,7 @@ fn main() -> ExitCode {
         gen_date,
         scope: args.scope.unwrap_or_default(),
         skeleton: args.skeleton,
+        compact: args.compact,
     };
 
     let out = render::render(

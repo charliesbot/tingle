@@ -84,6 +84,10 @@ fn test_tag_heuristics() {
     write(root, "cmd/main_test.go", "");
     write(root, "tests/integration.py", "");
     write(root, "src/tests/unit.py", "");
+    // Android Gradle convention: `<module>/src/test/java/...` and
+    // `<module>/src/androidTest/java/...`
+    write(root, "app/src/test/java/com/ex/FooTest.kt", "");
+    write(root, "app/src/androidTest/java/com/ex/BarTest.kt", "");
     write(root, "src/app.ts", "");
 
     let files = enumerate::repo(root).unwrap();
@@ -103,6 +107,12 @@ fn test_tag_heuristics() {
         .tags
         .contains(&"test".into()));
     assert!(find(&files, "src/tests/unit.py")
+        .tags
+        .contains(&"test".into()));
+    assert!(find(&files, "app/src/test/java/com/ex/FooTest.kt")
+        .tags
+        .contains(&"test".into()));
+    assert!(find(&files, "app/src/androidTest/java/com/ex/BarTest.kt")
         .tags
         .contains(&"test".into()));
     assert!(!find(&files, "src/app.ts").tags.contains(&"test".into()));

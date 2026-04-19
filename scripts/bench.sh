@@ -139,10 +139,12 @@ trap 'rm -rf "$tmp"' EXIT
       echo "| $label | ${bkb} KB | ${tk}k |"
     }
     row "default" "$largest"
+    row "\`--compact\`" --compact "$largest"
     row "\`--skeleton\`" --skeleton "$largest"
     while IFS= read -r s; do
       [ -z "$s" ] && continue
       row "\`--scope $s\`" --scope "$s" "$largest"
+      row "\`--scope $s --compact\`" --scope "$s" --compact "$largest"
     done <<<"$scopes"
   fi
 } > "$OUT"

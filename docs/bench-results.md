@@ -1,6 +1,6 @@
 # Bench results
 
-Measured: 2026-04-19T17:14:45Z
+Measured: 2026-04-19T21:47:56Z
 Host: Darwin 25.4.0 arm64
 Binary: rust/target/release/tingle
 
@@ -12,9 +12,9 @@ Binary: rust/target/release/tingle
 
 | Repo | Files | Wall-clock | Peak RSS | Output bytes | Output tokens |
 | --- | --- | --- | --- | --- | --- |
-| advent-of-code | 91 | 60 ms | 111 MB | 17.5 KB | 5.8k |
-| charliesbot.dev | 32 | 41 ms | 51 MB | 5.9 KB | 1.9k |
-| one | 166 | 58 ms | 91 MB | 116.7 KB | 29.4k |
+| advent-of-code | 91 | 61 ms | 105 MB | 15.8 KB | 5.3k |
+| charliesbot.dev | 32 | 42 ms | 51 MB | 5.1 KB | 1.7k |
+| one | 166 | 66 ms | 91 MB | 98.2 KB | 24.6k |
 
 ## Output-shrink flags on the largest repo
 
@@ -26,7 +26,10 @@ Largest repo: `one`
 
 | Invocation | Output bytes | Output tokens |
 | --- | --- | --- |
-| default | 116.7 KB | 29.4k |
-| `--skeleton` | 46.6 KB | 11.9k |
-| `--scope app` | 53.7 KB | 13.6k |
-| `--scope complications` | 48.2 KB | 12.2k |
+| default | 98.2 KB | 24.6k |
+| `--compact` | 49.4 KB | 12.0k |
+| `--skeleton` | 32.9 KB | 8.3k |
+| `--scope app` | 39.6 KB | 9.9k |
+| `--scope app --compact` | 28.9 KB | 7.3k |
+| `--scope complications` | 34.5 KB | 8.6k |
+| `--scope complications --compact` | 25.8 KB | 6.6k |

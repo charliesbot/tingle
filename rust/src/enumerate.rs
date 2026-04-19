@@ -182,6 +182,11 @@ fn is_test_path(p: &str) -> bool {
         || lp.ends_with("_test.go")
         || lp.starts_with("tests/")
         || lp.contains("/tests/")
+        // Android Gradle layout: `src/test/java/...` and `src/androidtest/java/...`.
+        || lp.contains("/src/test/")
+        || lp.contains("/src/androidtest/")
+        || lp.contains("/src/testdebug/")
+        || lp.contains("/src/testrelease/")
 }
 
 fn lower_ext(p: &str) -> String {

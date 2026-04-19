@@ -30,11 +30,20 @@ tingle /path/to/repo                  # map a specific repo
 tingle --alias '@:src' /path/to/repo  # apply an import alias (repeatable)
 tingle --no-legend /path/to/repo      # skip the legend line (re-invocation)
 tingle --scope core /path/to/repo     # F section only covers paths under `core/`
+tingle --compact /path/to/repo        # drop per-file def listings (paths + imports only)
 tingle --skeleton /path/to/repo       # omit F section; architecture layer only
 tingle --version
 ```
 
-`--scope` keeps the whole-repo Manifests/Entry points/Utilities/Modules sections but filters the per-file listing to a subtree — use when the default output is too big to fit in one tool call. `--skeleton` goes further and drops the file section entirely, leaving just the architecture layer (~60% size reduction on large repos).
+Output-size knobs, smallest first:
+
+- `--scope PATH` — filter the F section to a subtree; architecture layer still whole-repo.
+- `--compact` — drop per-file def listings, keep paths + imports + tags.
+- `--skeleton` — drop the F section entirely.
+
+Flags compose (`--scope app --compact`). On the bench's largest repo, `--scope <module> --compact` lands under 7k tokens.
+
+The output header emits `# warning: ~Nk tokens — consider ...` when the result exceeds ~20k tokens, pointing at the right knob.
 
 Parsed languages: TypeScript, JavaScript (JSX, MJS), Python, Go, Kotlin (+ KTS), C++. No state, no cache, stdout only. Re-run whenever the repo changes — it's faster than cache invalidation.
 
