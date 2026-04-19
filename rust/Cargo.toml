@@ -1,0 +1,59 @@
+[package]
+name = "tingle"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+description = "Fast, stateless orientation map for AI agents"
+repository = "https://github.com/charliesbot/tingle"
+
+[[bin]]
+name = "tingle"
+path = "src/main.rs"
+
+[lib]
+name = "tingle"
+path = "src/lib.rs"
+
+[dependencies]
+# Enumerate
+ignore = "0.4"
+walkdir = "2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Errors
+anyhow = "1"
+thiserror = "2"
+
+# Parse
+tree-sitter = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-kotlin-ng = "1.1"
+
+# Parallelism + laziness
+rayon = "1"
+once_cell = "1"
+
+# Manifest
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Text utils
+regex = "1"
+
+# UTC date for the "gen=" header
+time = { version = "0.3", features = ["formatting"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+codegen-units = 1

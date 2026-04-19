@@ -1,0 +1,27 @@
+# binaries
+/tingle
+/cmd/tingle/tingle
+*.exe
+
+# Go build cache / testing artifacts
+/dist/
+*.test
+*.out
+coverage.*
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# scratch / spike output
+/scratch/
+/spikes/*/out/
+
+# Spike build artifacts (Go binaries)
+/spikes/a_perf/spike
+/spikes/b_regex/tingle-regex
+/spikes/b_utility/tingle
+/spikes/d_puregoTS/spike
