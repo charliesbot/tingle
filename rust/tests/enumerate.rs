@@ -132,6 +132,24 @@ fn git_backed_tags_modified_and_untracked() {
 }
 
 #[test]
+fn modified_tracked_file_appears_once() {
+    // `git ls-files -com` emits the union without deduping; a tracked file
+    // that's been modified appears in both the -c and -m sets. Regression
+    // test for the duplicate-F-record bug.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    write(root, "a.ts", "// v1\n");
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["add", "a.ts"]);
+    git(root, &["commit", "-qm", "init"]);
+    fs::write(root.join("a.ts"), "// v2\n").unwrap();
+
+    let files = enumerate::repo(root).unwrap();
+    let a_count = files.iter().filter(|f| f.path == "a.ts").count();
+    assert_eq!(a_count, 1, "a.ts appeared {} times", a_count);
+}
+
+#[test]
 fn ext_lowercased_with_dot() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();

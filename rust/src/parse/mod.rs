@@ -242,9 +242,10 @@ pub fn all(repo: &Path, files: &mut [FileIndex], stats: &Stats) {
             return;
         };
 
-        let (defs, imports) = extract::extract_one(&compiled.query, tree.root_node(), &data);
-        f.defs = defs;
-        f.imports = imports;
+        let extracted = extract::extract_one(&compiled.query, tree.root_node(), &data);
+        f.defs = extracted.defs;
+        f.imports = extracted.imports;
+        f.package = extracted.package;
         stats.parsed_ok.fetch_add(1, Ordering::Relaxed);
     });
 }

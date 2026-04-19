@@ -48,6 +48,15 @@ pub fn repo(repo_path: &Path) -> Result<Vec<FileIndex>, EnumerateError> {
         walk_dir(&repo_abs)?
     };
 
+    // `git ls-files -com` emits the union of -c, -o, -m sets and does NOT
+    // dedupe. A tracked-and-modified file appears in both -c and -m, which
+    // renders as a duplicate F record downstream. Dedupe while preserving
+    // first-seen order.
+    {
+        let mut seen = HashSet::new();
+        paths.retain(|p| seen.insert(p.clone()));
+    }
+
     if let Some(ig) = load_tingleignore(&repo_abs) {
         paths.retain(|p| !matches_gitignore(&ig, p));
     }

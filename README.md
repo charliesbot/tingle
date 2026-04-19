@@ -29,8 +29,12 @@ tingle                                # print compact map to stdout (default: cw
 tingle /path/to/repo                  # map a specific repo
 tingle --alias '@:src' /path/to/repo  # apply an import alias (repeatable)
 tingle --no-legend /path/to/repo      # skip the legend line (re-invocation)
+tingle --scope core /path/to/repo     # F section only covers paths under `core/`
+tingle --skeleton /path/to/repo       # omit F section; architecture layer only
 tingle --version
 ```
+
+`--scope` keeps the whole-repo Manifests/Entry points/Utilities/Modules sections but filters the per-file listing to a subtree — use when the default output is too big to fit in one tool call. `--skeleton` goes further and drops the file section entirely, leaving just the architecture layer (~60% size reduction on large repos).
 
 Parsed languages: TypeScript, JavaScript (JSX, MJS), Python, Go, Kotlin (+ KTS), C++. No state, no cache, stdout only. Re-run whenever the repo changes — it's faster than cache invalidation.
 

@@ -35,6 +35,17 @@ struct Args {
     /// Omit the legend header line.
     #[arg(long = "no-legend")]
     no_legend: bool,
+
+    /// Filter the Files section to paths under PATH. Top sections
+    /// (Manifests, Entry points, Utilities, Modules) still render
+    /// whole-repo context.
+    #[arg(long = "scope", value_name = "PATH")]
+    scope: Option<String>,
+
+    /// Omit the Files section entirely — emit only the architecture
+    /// layer (manifests, entries, utilities, module graph).
+    #[arg(long = "skeleton")]
+    skeleton: bool,
 }
 
 fn main() -> ExitCode {
@@ -105,6 +116,8 @@ fn main() -> ExitCode {
         no_legend: args.no_legend,
         tokens_approx: 0,
         gen_date,
+        scope: args.scope.unwrap_or_default(),
+        skeleton: args.skeleton,
     };
 
     let out = render::render(

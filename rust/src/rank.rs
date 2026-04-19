@@ -37,7 +37,10 @@ pub fn graph(files: &mut [FileIndex]) -> GraphOutput {
     for (src_idx, src_file) in files.iter().enumerate() {
         let src_path = src_file.path.clone();
         let src_dir = parent_dir(&src_path).to_string();
-        let imports = src_file.imports.clone();
+        // Graph uses `resolved_imports` (repo-relative paths) — `imports` may
+        // carry compact display strings (e.g. Kotlin FQCNs) that intentionally
+        // don't appear in `by_path`.
+        let imports = src_file.resolved_imports.clone();
         for imp in &imports {
             if let Some(&tgt_idx) = by_path.get(imp) {
                 *in_deg_bumps.entry(tgt_idx).or_default() += 1;
@@ -212,7 +215,7 @@ mod tests {
         let mut files = vec![
             {
                 let mut f = fi("src/a.ts", "ts");
-                f.imports = vec!["src/util/helper.ts".into()];
+                f.resolved_imports = vec!["src/util/helper.ts".into()];
                 f
             },
             fi("src/util/helper.ts", "ts"),
@@ -229,7 +232,7 @@ mod tests {
         let mut files = vec![
             {
                 let mut f = fi("src/a.ts", "ts");
-                f.imports = vec!["src/b.ts".into()];
+                f.resolved_imports = vec!["src/b.ts".into()];
                 f
             },
             fi("src/b.ts", "ts"),

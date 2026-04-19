@@ -19,6 +19,14 @@ pub struct Options {
     /// ISO date (UTC) used in the `gen=...` header. Stable across runs for
     /// the parity gate — set to today's date at invocation time.
     pub gen_date: String,
+    /// `--scope <PATH>`: filter the `## Files` section to paths under this
+    /// prefix. Top sections (Manifests/EP/U/M) still render whole-repo
+    /// context. Empty string = no filter.
+    pub scope: String,
+    /// `--skeleton`: omit the `## Files` section entirely. Useful when the
+    /// agent only wants the architecture layer (manifests + entries +
+    /// utilities + module graph).
+    pub skeleton: bool,
 }
 
 const LEGEND_LINE: &str = "# legend: S=manifest EP=entry U=utility M=module-edge F=file  [M]=modified [untracked]=new-unstaged [test]=test-file  [path:line]=def  f=func c=class m=method i=interface t=type e=enum";
@@ -132,11 +140,23 @@ pub fn render(
         b.push('\n');
     }
 
-    // Files
+    // Files (omitted entirely in `--skeleton` mode)
+    if opts.skeleton {
+        return b;
+    }
     b.push_str("## Files\n");
+    // Normalize user-supplied scope: drop leading `./` and trailing `/`.
+    let scope = opts.scope.trim_start_matches("./").trim_end_matches('/');
     let mut sorted: Vec<&FileIndex> = files
         .iter()
         .filter(|f| !f.lang.is_empty() || !f.tags.is_empty())
+        .filter(|f| {
+            if scope.is_empty() {
+                true
+            } else {
+                f.path == scope || f.path.starts_with(&format!("{}/", scope))
+            }
+        })
         .collect();
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
     for f in sorted {
@@ -301,6 +321,60 @@ mod tests {
         let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
         assert!(out.contains(" 5 c App\n"), "{}", out);
         assert!(out.contains("  10 m start () -> void\n"), "{}", out);
+    }
+
+    #[test]
+    fn skeleton_omits_files_section() {
+        let f = FileIndex {
+            path: "a.ts".into(),
+            lang: "ts".into(),
+            ..Default::default()
+        };
+        let opts = Options {
+            version: "v0".into(),
+            gen_date: "2026-04-19".into(),
+            no_legend: true,
+            skeleton: true,
+            ..Default::default()
+        };
+        let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
+        assert!(
+            !out.contains("## Files"),
+            "output contains ## Files:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn scope_filters_files_section() {
+        let a = FileIndex {
+            path: "core/a.ts".into(),
+            lang: "ts".into(),
+            ..Default::default()
+        };
+        let b = FileIndex {
+            path: "app/b.ts".into(),
+            lang: "ts".into(),
+            ..Default::default()
+        };
+        let opts = Options {
+            version: "v0".into(),
+            gen_date: "2026-04-19".into(),
+            no_legend: true,
+            scope: "core".into(),
+            ..Default::default()
+        };
+        let out = render(
+            &[a, b],
+            &[],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &opts,
+        );
+        assert!(out.contains("F core/a.ts"), "{}", out);
+        assert!(!out.contains("F app/b.ts"), "{}", out);
     }
 
     #[test]

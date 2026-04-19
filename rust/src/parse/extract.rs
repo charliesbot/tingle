@@ -15,7 +15,14 @@ struct RawDef<'a> {
     outer_node: Option<Node<'a>>,
 }
 
-pub fn extract_one<'a>(query: &Query, root: Node<'a>, src: &[u8]) -> (Vec<Symbol>, Vec<String>) {
+pub struct Extracted {
+    pub defs: Vec<Symbol>,
+    pub imports: Vec<String>,
+    /// Dot-separated package name (Kotlin `package` header, etc.).
+    pub package: String,
+}
+
+pub fn extract_one<'a>(query: &Query, root: Node<'a>, src: &[u8]) -> Extracted {
     let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, src);
@@ -25,6 +32,7 @@ pub fn extract_one<'a>(query: &Query, root: Node<'a>, src: &[u8]) -> (Vec<Symbol
     let mut funcs: Vec<RawDef> = Vec::new();
     let mut imports: Vec<String> = Vec::new();
     let mut seen_import: HashSet<String> = HashSet::new();
+    let mut package = String::new();
 
     while let Some(m) = matches.next() {
         let mut def = RawDef {
@@ -40,6 +48,13 @@ pub fn extract_one<'a>(query: &Query, root: Node<'a>, src: &[u8]) -> (Vec<Symbol
                     if !trimmed.is_empty() && !seen_import.contains(trimmed) {
                         seen_import.insert(trimmed.to_string());
                         imports.push(trimmed.to_string());
+                    }
+                }
+            } else if name == "name.reference.package" {
+                // First package capture wins (there should only be one).
+                if package.is_empty() {
+                    if let Ok(text) = cap.node.utf8_text(src) {
+                        package = text.trim().to_string();
                     }
                 }
             } else if let Some(rest) = name.strip_prefix("name.definition.") {
@@ -117,7 +132,11 @@ pub fn extract_one<'a>(query: &Query, root: Node<'a>, src: &[u8]) -> (Vec<Symbol
     let mut all = class_syms;
     all.extend(func_syms);
     all.sort_by_key(|s| s.line);
-    (all, imports)
+    Extracted {
+        defs: all,
+        imports,
+        package,
+    }
 }
 
 fn build_symbol(
