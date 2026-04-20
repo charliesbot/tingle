@@ -127,9 +127,14 @@ fn write_header(
         // filesystem namespaces, and /tmp inside the container isn't
         // reachable by the outside agent. The agent picks a path it
         // can read back.
+        // Order intentional: lead with lossless workarounds (file
+        // redirect keeps everything; --scope keeps everything for a
+        // subtree). `--skeleton` is a real fallback but it drops the F
+        // section — the per-file detail that's tingle's whole job — so
+        // it's a worse default suggestion than the lossless options.
         writeln!(
             out,
-            "# warning: ~{}k tokens — exceeds many agent previews. Pipe to a file your agent can Read (e.g. `tingle ... > out.md`), or shrink with --skeleton / --scope PATH",
+            "# warning: ~{}k tokens — exceeds many agent previews. Pipe to a file your agent can Read (e.g. `tingle ... > out.md`) or zoom in with --scope PATH (both lossless). --skeleton drops F section if you only need the architecture layer.",
             approx_tokens / 1000
         )
         .unwrap();
