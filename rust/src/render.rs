@@ -37,11 +37,15 @@ pub struct Options {
 }
 
 /// Token count above which the header includes a shrink-suggestion line.
-/// Char/4 approximation of cl100k_base. 20k is a rough "fits in one
-/// agent turn with room for reply" budget — most agent environments
-/// cap a single tool result around 20-30k tokens; crossing 20k is the
-/// right signal to suggest `--compact`/`--scope`/`--skeleton`.
-const TOKEN_WARN_THRESHOLD: usize = 20_000;
+/// Char/4 approximation of cl100k_base.
+///
+/// 8k chosen because that's roughly where agent CLI tool-result previews
+/// start to truncate (~30-40KB of inline output). The warning's
+/// actionable hint — pipe to a file the agent can Read, or shrink with
+/// --skeleton/--scope — is what agents need at THIS size, not at 20k
+/// where the output is already unrecoverable in many environments.
+/// Small repos (<8k tokens fit comfortably anywhere) don't see it.
+const TOKEN_WARN_THRESHOLD: usize = 8_000;
 
 pub fn render(
     files: &[FileIndex],
