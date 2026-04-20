@@ -117,9 +117,15 @@ fn write_header(
         // by the agent's tool-result preview. Lists actions in order of
         // most-common-fix-first: agents keep independently inventing
         // the file-redirect workaround, so put it first.
+        //
+        // Don't hardcode `/tmp/...` — in container/sandbox setups the
+        // tingle process and the agent process can sit in different
+        // filesystem namespaces, and /tmp inside the container isn't
+        // reachable by the outside agent. The agent picks a path it
+        // can read back.
         writeln!(
             out,
-            "# warning: ~{}k tokens — exceeds many agent previews. Try `tingle ... > /tmp/map.md && Read /tmp/map.md`, or shrink with --skeleton / --scope PATH",
+            "# warning: ~{}k tokens — exceeds many agent previews. Pipe to a file your agent can Read (e.g. `tingle ... > out.md`), or shrink with --skeleton / --scope PATH",
             approx_tokens / 1000
         )
         .unwrap();
