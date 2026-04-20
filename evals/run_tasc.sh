@@ -22,8 +22,9 @@ DICT_THRESH="${TASC_THRESH:-4}"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# Generate + dict-substitute.
-"$TINGLE_BIN" "${TINGLE_FLAGS[@]+${TINGLE_FLAGS[@]}}" "$REPO" 2>/dev/null \
+# Generate + dict-substitute. `--stdout` opts out of the file-writing
+# default so we can pipe tingle's output through the post-processor.
+"$TINGLE_BIN" --stdout "${TINGLE_FLAGS[@]+${TINGLE_FLAGS[@]}}" "$REPO" 2>/dev/null \
   | python3 evals/tasc_dict.py --top "$DICT_TOP" --threshold "$DICT_THRESH" \
   > "$tmp/map.txt"
 

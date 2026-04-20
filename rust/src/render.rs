@@ -34,6 +34,11 @@ pub struct Options {
     /// repos) showed the compact layout preserves agent task quality
     /// (≥0.97 mean score) while saving 47-58% of tokens vs `--full`.
     pub full: bool,
+    /// Suppress the soft token warning. When the caller is writing to a
+    /// file (the default), there's no preview to overflow, so the
+    /// "consider --skeleton / --scope / pipe to file" advice is moot
+    /// and just burns tokens. Stdout mode keeps the warning.
+    pub suppress_warning: bool,
 }
 
 /// Token count above which the header includes a shrink-suggestion line.
@@ -115,8 +120,9 @@ fn write_header(
     }
 
     // Soft token warning — char/4 is a rough cl100k_base approximation.
+    // Skipped when writing to a file (no preview to exceed).
     let approx_tokens = (body.len() + out.len()) / 4;
-    if approx_tokens > TOKEN_WARN_THRESHOLD {
+    if !opts.suppress_warning && approx_tokens > TOKEN_WARN_THRESHOLD {
         // Warning emits before the body, so it survives any truncation
         // by the agent's tool-result preview. Lists actions in order of
         // most-common-fix-first: agents keep independently inventing

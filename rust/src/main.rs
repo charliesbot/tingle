@@ -1,15 +1,26 @@
-//! tingle — fast, stateless orientation map for AI agents.
+//! tingle — orientation map for AI agents.
+//!
+//! Default behavior writes to `<repo>/.tinglemap.md` — agents `Read` the
+//! file instead of parsing tingle's stdout, dodging Bash-tool preview
+//! caps entirely. Every invocation regenerates from scratch (no cache;
+//! sub-second parse time makes correctness cheaper than invalidation).
 //!
 //! Usage:
 //!
 //! ```text
-//! tingle [REPO]
-//! tingle --alias PREFIX:PATH [REPO]
-//! tingle --no-legend [REPO]
+//! tingle [REPO]                   # write .tinglemap.md; print status line
+//! tingle --stdout [REPO]          # print map to stdout (old default)
+//! tingle --out PATH [REPO]        # write to PATH instead of .tinglemap.md
+//! tingle --alias PREFIX:PATH ...  # import alias substitution
+//! tingle --scope PATH ...         # filter F section to subtree
+//! tingle --skeleton ...           # drop F section (architecture only)
+//! tingle --full ...               # include per-file def signatures
+//! tingle --no-legend ...          # skip the legend line
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use clap::Parser;
@@ -17,16 +28,28 @@ use time::OffsetDateTime;
 
 use tingle::{enumerate, manifest, parse, rank, render, resolve};
 
+const DEFAULT_OUTPUT_FILE: &str = ".tinglemap.md";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "tingle",
     version,
-    about = "Fast, stateless orientation map for AI agents"
+    about = "Orientation map for AI agents (writes .tinglemap.md by default)"
 )]
 struct Args {
     /// Repo path (default: .)
     #[arg(value_name = "REPO")]
     repo: Option<PathBuf>,
+
+    /// Print the map to stdout instead of writing a file. Use for shell
+    /// pipelines (e.g. `tingle --stdout | jq`).
+    #[arg(long = "stdout")]
+    stdout: bool,
+
+    /// Write the map to PATH instead of the default `<repo>/.tinglemap.md`.
+    /// Ignored when `--stdout` is set.
+    #[arg(long = "out", value_name = "PATH")]
+    out: Option<PathBuf>,
 
     /// Map an import prefix to a repo path; repeatable (e.g. `--alias '@:src'`).
     #[arg(long = "alias", value_name = "PREFIX:PATH", action = clap::ArgAction::Append)]
@@ -63,7 +86,7 @@ struct Args {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let repo = args.repo.unwrap_or_else(|| PathBuf::from("."));
+    let repo = args.repo.clone().unwrap_or_else(|| PathBuf::from("."));
     let repo_abs = match repo.canonicalize() {
         Ok(p) => p,
         Err(e) => {
@@ -85,7 +108,7 @@ fn main() -> ExitCode {
         aliases.insert(spec[..idx].to_string(), spec[idx + 1..].to_string());
     }
 
-    // 1. enumerate
+    // Pipeline: enumerate → parse → resolve → rank → render.
     let mut files = match enumerate::repo(&repo_abs) {
         Ok(f) => f,
         Err(e) => {
@@ -94,17 +117,10 @@ fn main() -> ExitCode {
         }
     };
 
-    // 2. parse
     parse::new_run();
     parse::all(&repo_abs, &mut files, &parse::PACKAGE_STATS);
-
-    // 3. resolve
     resolve::all(&mut files, &aliases);
-
-    // 4. rank
     let g = rank::graph(&mut files);
-
-    // 4a. manifest
     let m = manifest::scan(&repo_abs);
 
     let entries = rank::entry_points(
@@ -117,7 +133,6 @@ fn main() -> ExitCode {
     );
     let utilities = rank::utilities(&files);
 
-    // 5. render
     let gen_date = OffsetDateTime::now_utc()
         .format(&time::format_description::parse("[year]-[month]-[day]").unwrap())
         .unwrap_or_default();
@@ -132,9 +147,10 @@ fn main() -> ExitCode {
         scope: args.scope.unwrap_or_default(),
         skeleton: args.skeleton,
         full: args.full,
+        suppress_warning: !args.stdout,
     };
 
-    let out = render::render(
+    let map = render::render(
         &files,
         &entries,
         &utilities,
@@ -143,7 +159,34 @@ fn main() -> ExitCode {
         &m.s_records,
         &opts,
     );
-    print!("{}", out);
+
+    // Decide output destination: --stdout wins over --out; --out wins
+    // over default. When writing a file, stdout gets a one-line status
+    // instead of the map (so downstream tools can log / detect the
+    // path without parsing the map).
+    if args.stdout {
+        print!("{}", map);
+    } else {
+        let out_path = args
+            .out
+            .unwrap_or_else(|| repo_abs.join(DEFAULT_OUTPUT_FILE));
+        match write_atomic(&out_path, map.as_bytes()) {
+            Ok(()) => {
+                let bytes = map.len();
+                let tokens_k = (bytes as f64 / 4000.0).max(0.1);
+                let rel_display = display_path(&out_path, &repo_abs);
+                println!(
+                    "wrote {} ({} bytes, ~{:.1}k tokens)",
+                    rel_display, bytes, tokens_k
+                );
+                maybe_gitignore_hint(&out_path, &repo_abs);
+            }
+            Err(e) => {
+                eprintln!("tingle: failed to write {}: {}", out_path.display(), e);
+                return ExitCode::from(1);
+            }
+        }
+    }
 
     use std::sync::atomic::Ordering;
     let perr = parse::PACKAGE_STATS.parse_errors.load(Ordering::Relaxed);
@@ -161,7 +204,63 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn short_git_commit(repo: &std::path::Path) -> String {
+/// Write atomically: to `path.tmp.<pid>`, then rename. Prevents
+/// torn reads when two tingle invocations race in the same CWD.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_file_name(format!(
+        "{}.tmp.{}",
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(DEFAULT_OUTPUT_FILE),
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
+/// Format a path for the status line: relative to the repo when inside,
+/// else absolute. Keeps the common case short.
+fn display_path(path: &Path, repo: &Path) -> String {
+    match path.strip_prefix(repo) {
+        Ok(rel) => rel.display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// If the output file is being written inside the repo and the repo's
+/// `.gitignore` doesn't mention it, nudge the user once per run. Crude
+/// substring check — gitignore has glob semantics we don't fully parse,
+/// but catches the common case of "user forgot to add this line."
+fn maybe_gitignore_hint(out_path: &Path, repo: &Path) {
+    let Ok(rel) = out_path.strip_prefix(repo) else {
+        return; // output is outside the repo; not our business
+    };
+    let rel_str = rel.display().to_string();
+    let gitignore = repo.join(".gitignore");
+    let Ok(content) = std::fs::read_to_string(&gitignore) else {
+        return; // no .gitignore → not a git repo, or user manages it elsewhere
+    };
+    // Look for the exact file name OR a leading-dot pattern that covers it.
+    let covered = content.lines().any(|line| {
+        let line = line.trim();
+        line == rel_str
+            || line == format!("/{}", rel_str)
+            || line == DEFAULT_OUTPUT_FILE
+            || line == format!("/{}", DEFAULT_OUTPUT_FILE)
+    });
+    if !covered {
+        eprintln!(
+            "tingle: hint — add `{}` to .gitignore (generated artifact; committing invites drift)",
+            DEFAULT_OUTPUT_FILE
+        );
+    }
+}
+
+fn short_git_commit(repo: &Path) -> String {
     let out = Command::new("git")
         .args(["-C"])
         .arg(repo)

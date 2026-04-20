@@ -69,11 +69,14 @@ trap 'rm -rf "$tmp"' EXIT
   for repo in "$@"; do
     name=$(basename "$repo")
 
+    # `--stdout` bypasses the file-writing default so we can measure
+    # the map itself (not the status line) and avoid writing
+    # .tinglemap.md into the target repos on every bench run.
     hyperfine --warmup 3 --runs 10 --export-json "$tmp/$name.json" \
-      "$BIN $repo > /dev/null" >/dev/null 2>&1 || true
+      "$BIN --stdout $repo > /dev/null" >/dev/null 2>&1 || true
     mean=$(python3 -c "import json; d=json.load(open('$tmp/$name.json')); print(f\"{d['results'][0]['mean']*1000:.0f} ms\")")
 
-    /usr/bin/time -l "$BIN" "$repo" > "$tmp/$name.out" 2> "$tmp/$name.rss" || true
+    /usr/bin/time -l "$BIN" --stdout "$repo" > "$tmp/$name.out" 2> "$tmp/$name.rss" || true
     rss=$(extract_rss "$tmp/$name.rss")
     rss_mb=$((rss / 1024 / 1024))
 
@@ -131,7 +134,10 @@ trap 'rm -rf "$tmp"' EXIT
     )
     row() {
       local label="$1"; shift
-      "$BIN" "$@" > "$tmp/variant.out" 2>/dev/null
+      # --stdout captures the map content to the variant file; without it
+      # we'd get just the status line and also write .tinglemap.md into
+      # the target repo.
+      "$BIN" --stdout "$@" > "$tmp/variant.out" 2>/dev/null
       local b=$(stat -f '%z' "$tmp/variant.out" 2>/dev/null || stat -c '%s' "$tmp/variant.out")
       local t=$(count_tokens "$tmp/variant.out")
       local bkb=$(awk -v b="$b" 'BEGIN{printf "%.1f", b/1024}')
@@ -139,12 +145,12 @@ trap 'rm -rf "$tmp"' EXIT
       echo "| $label | ${bkb} KB | ${tk}k |"
     }
     row "default" "$largest"
-    row "\`--compact\`" --compact "$largest"
+    row "\`--full\`" --full "$largest"
     row "\`--skeleton\`" --skeleton "$largest"
     while IFS= read -r s; do
       [ -z "$s" ] && continue
       row "\`--scope $s\`" --scope "$s" "$largest"
-      row "\`--scope $s --compact\`" --scope "$s" --compact "$largest"
+      row "\`--scope $s --full\`" --scope "$s" --full "$largest"
     done <<<"$scopes"
   fi
 } > "$OUT"

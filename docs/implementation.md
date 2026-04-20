@@ -6,14 +6,14 @@ How tingle is built and how its output is generated. Design rationale lives in [
 
 ## One-line summary
 
-A Rust CLI that takes a repo path and prints a compact, ranked, tag-prefixed orientation map to stdout. Five pipeline stages, one output, no state.
+A Rust CLI that takes a repo path and writes a compact, ranked, tag-prefixed orientation map to `<repo>/.tinglemap.md` (or to stdout with `--stdout` for pipelines). Five pipeline stages, one output, no cache.
 
 ---
 
 ## Pipeline
 
 ```
-repo path ──▶ enumerate ──▶ parse ──▶ resolve ──▶ rank ──▶ render ──▶ stdout
+repo path ──▶ enumerate ──▶ parse ──▶ resolve ──▶ rank ──▶ render ──▶ .tinglemap.md | stdout
 ```
 
 Each stage reads the previous stage's output. No branching, no side effects, no retries.
@@ -253,7 +253,9 @@ No automatic pruning. Agent decides. Threshold is char/4 — a rough cl100k_base
 ## CLI surface
 
 ```
-tingle [REPO]                           # default: cwd. Compact layout by default.
+tingle [REPO]                           # writes <REPO>/.tinglemap.md; prints status line
+tingle --stdout [REPO]                  # print map to stdout (for pipelines)
+tingle --out PATH [REPO]                # write to PATH instead of .tinglemap.md
 tingle --full [REPO]                    # add per-file def signatures + 3 callers/U
 tingle --scope PATH [REPO]              # filter F section to subtree
 tingle --skeleton [REPO]                # drop F section entirely
@@ -261,6 +263,22 @@ tingle --alias PREFIX:PATH [REPO]       # repeatable; alias-substitute imports
 tingle --no-legend [REPO]               # skip the legend line
 tingle --version
 ```
+
+File-write mode (default) dodges agent Bash-tool preview caps — agents
+`Read('./.tinglemap.md')` instead of parsing truncated stdout. Status line
+on stdout after a successful write:
+
+```
+wrote .tinglemap.md (36528 bytes, ~9.1k tokens)
+```
+
+tingle also prints a one-time hint if `.gitignore` in the repo root
+doesn't cover `.tinglemap.md` — the file is a generated artifact and
+committing it invites PR-review drift.
+
+Atomic write: tingle writes to `.tinglemap.md.tmp.<pid>` and then
+`rename()`s. Concurrent tingle invocations in the same CWD produce
+last-writer-wins, not a torn read.
 
 `--compact` is accepted as a hidden no-op for backwards compat (it's now the default).
 
@@ -297,9 +315,11 @@ Why `imports` and `resolved_imports` are decoupled: full Kotlin repo paths (`cor
 
 ---
 
-## State: none
+## State: `.tinglemap.md` only, no cache
 
-No cache, no persistent files, no `.tingle/` directory. Every run is a full rebuild from source. At sub-second parse time on test repos (see `bench-results.md`), "re-run the CLI" is cheaper than cache invalidation.
+Default behavior writes `<repo>/.tinglemap.md` — a generated artifact, not state. Every invocation regenerates from scratch; tingle never reads `.tinglemap.md` back. At sub-second parse time on test repos (see `bench-results.md`), "re-run the CLI" is cheaper than correct cache invalidation would be.
+
+We originally rejected ALL on-disk output to avoid cross-file cache hell (a stale per-file cache entry pointing to wrong data). A whole-repo output artifact is a different beast — it's what the agent reads instead of tingle's stdout. No invalidation logic because there's no cache to invalidate.
 
 ---
 

@@ -98,7 +98,7 @@ Both matter. Cheap output with equal quality is a win. Higher quality but 3× to
 
 ## Approach
 
-A single Rust binary, stateless, writes a compact tag-prefixed map to stdout:
+A single Rust binary, no cache, writes a compact tag-prefixed map to `.tinglemap.md` in the target repo by default (or to stdout with `--stdout` for pipelines):
 
 1. Enumerates files via `git ls-files -com --exclude-standard -z` (cached, others, modified — minus gitignored), deduping (the `-com` union doesn't dedupe — a tracked-and-modified file appears in both `-c` and `-m`). **No-git fallback:** if `.git` is missing, falls back to `walkdir::WalkDir` with default ignores (`node_modules`, `dist`, `build`, `.venv`, `venv`, `target`, `.next`, `out`, `coverage`). Applies `.tingleignore` on top either way.
 2. Parses each file in parallel via `rayon` with tree-sitter (canonical C runtime) → `{defs, imports, package}` per file. Method attachment to enclosing class by byte-range containment.
@@ -109,11 +109,14 @@ A single Rust binary, stateless, writes a compact tag-prefixed map to stdout:
 Agent invocation (any subagent, orchestrator, or top-level agent):
 
 ```
-tingle                  # prints Markdown to stdout; agent captures into context
-tingle > map.md         # or redirect to a file if the agent wants one
+tingle                  # writes ./.tinglemap.md; agent reads it with `Read`
+tingle --stdout         # old behavior; agent captures stdout into context
+tingle --out PATH       # custom output path
 ```
 
-No cache. No `.tingle/` directory. No on-disk state. If the agent's context gets compacted, it re-runs the CLI — which at sub-second parse time is cheaper than cache invalidation bugs.
+Writing to a file dodges Bash-tool preview caps (~30-40KB on most agent CLIs) that truncate inline output on medium+ repos. Three independent agent reviews in a row hit this limit and self-rescued via `tingle > file && Read file`; making it the default shortens the loop by one invocation.
+
+No cache, no staleness detection, no `.tingle/` directory. Every run regenerates from scratch — sub-second parse time makes correctness cheaper than invalidation logic. `.tinglemap.md` is gitignored by convention; tingle prints a one-time hint when it isn't.
 
 ### Architecture
 
@@ -232,7 +235,7 @@ Design notes:
 
 ### State: none
 
-v1 ships stateless. No cache, no persistent files, no `.tingle/` directory. Every run is a full rebuild from source.
+No cache. Every run is a full rebuild from source. Default behavior writes `.tinglemap.md` (the agent's next `Read` sees the fresh output); `--stdout` preserves the original pipeline-friendly stdout mode. No fingerprint cache, no per-file cache, no `.tingle/` directory.
 
 Rationale: at sub-second parse time, "re-run the CLI" is cheaper than cache invalidation. Cross-file invalidation (A changes its exports → B's resolved refs go stale even though B's content didn't change) is the hardest part of a cache, and we delete the problem entirely by not caching.
 

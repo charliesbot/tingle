@@ -39,8 +39,9 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# Generate the tingle output once.
-"$TINGLE_BIN" "${TINGLE_FLAGS[@]+"${TINGLE_FLAGS[@]}"}" "$REPO" > "$tmp/map.txt" 2>/dev/null
+# Generate the tingle output once. `--stdout` opts out of the
+# file-writing default so we capture the map content via pipe.
+"$TINGLE_BIN" --stdout "${TINGLE_FLAGS[@]+"${TINGLE_FLAGS[@]}"}" "$REPO" > "$tmp/map.txt" 2>/dev/null
 map_bytes=$(wc -c < "$tmp/map.txt")
 map_tokens=$(python3 -c "
 import sys
