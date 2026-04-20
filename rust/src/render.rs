@@ -507,7 +507,7 @@ fn write_defs(b: &mut String, defs: &[Symbol]) {
 /// `SettingsViewModel`). Fallback to the first def. This makes the EP
 /// label match the file's actual identity instead of whatever happens to
 /// declare first (a sibling data class, a private helper, etc.).
-fn primary_def<'a>(f: &'a FileIndex) -> Option<&'a Symbol> {
+fn primary_def(f: &FileIndex) -> Option<&Symbol> {
     let stem = file_stem(&f.path);
     f.defs
         .iter()
