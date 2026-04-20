@@ -502,15 +502,36 @@ fn write_defs(b: &mut String, defs: &[Symbol]) {
     }
 }
 
+/// Pick the def whose name matches the file's basename-without-extension
+/// (Kotlin/Java/C# convention: file `SettingsViewModel.kt` declares class
+/// `SettingsViewModel`). Fallback to the first def. This makes the EP
+/// label match the file's actual identity instead of whatever happens to
+/// declare first (a sibling data class, a private helper, etc.).
+fn primary_def<'a>(f: &'a FileIndex) -> Option<&'a Symbol> {
+    let stem = file_stem(&f.path);
+    f.defs
+        .iter()
+        .find(|d| d.name == stem)
+        .or_else(|| f.defs.first())
+}
+
 fn first_def_name(f: &FileIndex) -> String {
-    match f.defs.first() {
+    match primary_def(f) {
         Some(d) => d.name.clone(),
         None => basename(&f.path).to_string(),
     }
 }
 
 fn first_def_line(f: &FileIndex) -> u32 {
-    f.defs.first().map(|d| d.line).unwrap_or(1)
+    primary_def(f).map(|d| d.line).unwrap_or(1)
+}
+
+fn file_stem(p: &str) -> &str {
+    let base = basename(p);
+    match base.rfind('.') {
+        Some(i) if i > 0 => &base[..i],
+        _ => base,
+    }
 }
 
 fn basename(p: &str) -> &str {
@@ -908,6 +929,71 @@ mod tests {
         assert_eq!(
             compact_label_path("core/src/main/java/com/x/shared/core"),
             "core"
+        );
+    }
+
+    #[test]
+    fn ep_label_prefers_def_matching_file_basename() {
+        // File is SettingsViewModel.kt but the FIRST def is a sibling data
+        // class `SettingsUiState`. Without basename preference, the EP
+        // record labels as `SettingsUiState` which is misleading.
+        let f = FileIndex {
+            path: "src/SettingsViewModel.kt".into(),
+            lang: "kt".into(),
+            out_deg: 11,
+            in_deg: 1,
+            defs: vec![
+                make_def("SettingsUiState", 28, SymbolKind::Class),
+                make_def("SettingsViewModel", 50, SymbolKind::Class),
+            ],
+            ..Default::default()
+        };
+        let opts = opts_minimal();
+        let files = [f];
+        let out = render(
+            &files,
+            &[&files[0]],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &opts,
+        );
+        assert!(
+            out.contains("EP src/SettingsViewModel.kt:50 SettingsViewModel (out=11 in=1)"),
+            "expected basename-matching def to be the EP label, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn ep_label_falls_back_to_first_def_when_no_match() {
+        let f = FileIndex {
+            path: "src/main.go".into(),
+            lang: "go".into(),
+            out_deg: 5,
+            defs: vec![
+                make_def("helper", 5, SymbolKind::Func),
+                make_def("main", 10, SymbolKind::Func),
+            ],
+            ..Default::default()
+        };
+        let opts = opts_minimal();
+        let files = [f];
+        let out = render(
+            &files,
+            &[&files[0]],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &opts,
+        );
+        // file_stem("main.go") = "main" → matches the second def
+        assert!(
+            out.contains("EP src/main.go:10 main (out=5 in=0)"),
+            "{}",
+            out
         );
     }
 
