@@ -239,12 +239,17 @@ fn resolve_kotlin_fqcn(imp: &str, idx: &KotlinIndex) -> Option<String> {
     None
 }
 
-/// Render a resolved Kotlin import path as `<module>:<ClassName>`.
+/// Render a resolved Kotlin import path as `<module>/<ClassName>`.
 ///
 /// Takes a repo-relative path like `core/src/main/java/com/ex/shared/Repo.kt`
-/// and returns `core:Repo`. For nested feature modules like
+/// and returns `core/Repo`. For nested feature modules like
 /// `features/settings/app/src/main/java/.../Foo.kt`, returns
-/// `features/settings/app:Foo` (first path element up to `src/` boundary).
+/// `features/settings/app/Foo` (first path element up to `src/` boundary).
+///
+/// (Slash, not colon: agent feedback noted that `core:data/repository`-style
+/// labels read as Gradle-`:module:`-notation but aren't, causing mental
+/// remapping. Slashes throughout are honest about what we know — these are
+/// repo-relative virtual paths, not Gradle module declarations.)
 fn kotlin_compact_display(resolved_path: &str) -> String {
     let parts: Vec<&str> = resolved_path.split('/').collect();
     let filename = parts.last().copied().unwrap_or("");
@@ -277,7 +282,7 @@ fn kotlin_compact_display(resolved_path: &str) -> String {
     if boundary == 0 {
         class_name.to_string()
     } else {
-        format!("{}:{}", parts[..boundary].join("/"), class_name)
+        format!("{}/{}", parts[..boundary].join("/"), class_name)
     }
 }
 
@@ -415,7 +420,7 @@ mod tests {
         ];
         files[1].imports = vec!["com.ex.shared.Repo".into()];
         all(&mut files, &HashMap::new());
-        assert_eq!(files[1].imports, vec!["core:Repo"]);
+        assert_eq!(files[1].imports, vec!["core/Repo"]);
         assert_eq!(
             files[1].resolved_imports,
             vec!["core/src/main/java/com/ex/shared/Repo.kt"]
@@ -440,7 +445,7 @@ mod tests {
         // class, not the member.
         files[1].imports = vec!["com.ex.shared.Const.LOG_TAG".into()];
         all(&mut files, &HashMap::new());
-        assert_eq!(files[1].imports, vec!["core:Const"]);
+        assert_eq!(files[1].imports, vec!["core/Const"]);
         assert_eq!(
             files[1].resolved_imports,
             vec!["core/src/main/java/com/ex/shared/Const.kt"]
@@ -451,11 +456,11 @@ mod tests {
     fn kotlin_compact_display_handles_nested_modules() {
         assert_eq!(
             kotlin_compact_display("core/src/main/java/com/ex/Repo.kt"),
-            "core:Repo"
+            "core/Repo"
         );
         assert_eq!(
             kotlin_compact_display("features/settings/app/src/main/java/com/ex/Foo.kt"),
-            "features/settings/app:Foo"
+            "features/settings/app/Foo"
         );
         assert_eq!(kotlin_compact_display("NoSrcPath.kt"), "NoSrcPath");
     }
@@ -465,11 +470,11 @@ mod tests {
         // KMP: shared/commonMain/kotlin/...
         assert_eq!(
             kotlin_compact_display("shared/commonMain/kotlin/com/ex/Foo.kt"),
-            "shared:Foo"
+            "shared/Foo"
         );
         assert_eq!(
             kotlin_compact_display("shared/androidMain/kotlin/com/ex/Bar.kt"),
-            "shared:Bar"
+            "shared/Bar"
         );
     }
 

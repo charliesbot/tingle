@@ -6,7 +6,7 @@
 //! Empty sections are omitted. The legend line is context-aware — it only
 //! mentions prefix/tag categories that actually appear in THIS run.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
 use crate::model::{FileIndex, Symbol};
@@ -144,10 +144,13 @@ fn build_legend(
         sections.push("S=manifest");
     }
     if !entries.is_empty() {
-        sections.push("EP=entry");
+        // Defines out=/in= here so agents don't have to guess the
+        // semantics from context (feedback: legend was over-promising
+        // section markers and under-explaining numeric ones).
+        sections.push("EP=entry(out=imports-out,in=imports-in)");
     }
     if !utilities.is_empty() {
-        sections.push("U=utility");
+        sections.push("U=utility(in=fan-in)");
     }
     if !dir_edges.is_empty() {
         sections.push("M=module-edge");
@@ -190,6 +193,16 @@ fn build_legend(
         if !tag_parts.is_empty() {
             parts.push(tag_parts.join(" "));
         }
+    }
+
+    // [hub] marker — only emitted when at least one EP record will carry
+    // it (i.e., a file appears in both EP and U).
+    let hub_present = !entries.is_empty()
+        && utilities
+            .iter()
+            .any(|u| entries.iter().any(|e| e.path == u.path));
+    if hub_present {
+        parts.push("[hub]=both-entry-and-utility".to_string());
     }
 
     // Def-kind markers — only if the F section will actually render defs.
@@ -253,16 +266,27 @@ fn build_body(
         b.push('\n');
     }
 
-    // Entry points
+    // Entry points. EP records that ALSO qualify as utilities (file is
+    // both heavily importing AND heavily imported) get an inline `[hub]`
+    // tag. These are orchestrator/manager files whose role doesn't fit
+    // cleanly as either entry or utility — surfacing the duality saves
+    // the agent from having to compare numbers across sections.
     if !entries.is_empty() {
+        let utility_paths: std::collections::HashSet<&str> =
+            utilities.iter().map(|u| u.path.as_str()).collect();
         b.push_str("## Entry points\n");
         for f in entries {
             let name = first_def_name(f);
             let line = first_def_line(f);
+            let hub = if utility_paths.contains(f.path.as_str()) {
+                " [hub]"
+            } else {
+                ""
+            };
             writeln!(
                 b,
-                "EP {}:{} {} (out={} in={})",
-                f.path, line, name, f.out_deg, f.in_deg
+                "EP {}:{} {} (out={} in={}){}",
+                f.path, line, name, f.out_deg, f.in_deg, hub
             )
             .unwrap();
         }
@@ -304,18 +328,37 @@ fn build_body(
     // Modules. Dirs here are architecture *labels*, never anchors — the
     // agent never Reads a directory — so strip Gradle source-root
     // boilerplate for token efficiency.
+    //
+    // Dedup by *compacted* form: when a module has both `src/main/java/...`
+    // and `src/main/kotlin/...` source roots, the raw graph holds them as
+    // separate src dirs that compact to the same label (e.g.,
+    // `core/domain/usecase`). Without merging, the M section repeats the
+    // same logical edge across multiple lines — a real bug flagged by two
+    // agents independently.
     if !dir_edges.is_empty() {
-        b.push_str("## Modules\n");
-        let mut srcs: Vec<&String> = dir_edges.keys().collect();
-        srcs.sort();
-        for src in srcs {
-            let dsts: Vec<String> = dir_edges[src]
-                .iter()
-                .map(|d| compact_label_path(d))
-                .collect();
-            writeln!(b, "M {} -> {}", compact_label_path(src), dsts.join(" ")).unwrap();
+        let mut merged: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (raw_src, raw_dsts) in dir_edges {
+            let src_label = compact_label_path(raw_src);
+            let entry = merged.entry(src_label).or_default();
+            for d in raw_dsts {
+                entry.insert(compact_label_path(d));
+            }
         }
-        b.push('\n');
+        // Drop self-edges that may appear after compaction (same module
+        // referencing itself once source-set boundaries collapse).
+        for (src, dsts) in merged.iter_mut() {
+            dsts.remove(src);
+        }
+        merged.retain(|_, dsts| !dsts.is_empty());
+
+        if !merged.is_empty() {
+            b.push_str("## Modules\n");
+            for (src, dsts) in &merged {
+                let dst_str: Vec<&str> = dsts.iter().map(|s| s.as_str()).collect();
+                writeln!(b, "M {} -> {}", src, dst_str.join(" ")).unwrap();
+            }
+            b.push('\n');
+        }
     }
 
     // Files
@@ -424,19 +467,24 @@ fn parent_dir(p: &str) -> String {
 /// Compact a repo path for **label** use (M records, U caller lists) where
 /// the path is informational, not an anchor for downstream Read. Strips
 /// Gradle source-root boilerplate — `src/main/<lang>/com/<org>/<proj>` —
-/// producing `<module>:<tail>` form.
+/// producing `<module>/<tail>` form (slashes throughout — see Note below).
 ///
 /// Anchors (F records, EP records, U record paths) must NOT use this —
 /// the agent needs the full path to Read the file.
 ///
 /// Examples:
-///   `core/src/main/java/com/charliesbot/shared/core/constants` → `core:constants`
-///   `app/src/main/kotlin/com/x/one/data/Foo.kt` → `app:data/Foo.kt`
+///   `core/src/main/java/com/charliesbot/shared/core/constants` → `core/constants`
+///   `app/src/main/kotlin/com/x/one/data/Foo.kt` → `app/data/Foo.kt`
 ///   `features/dashboard/app/src/main/java/com/x/one/features/dashboard/VM.kt`
-///     → `features/dashboard/app:features/dashboard/VM.kt` (no module-tail dedup
-///        when the module is nested)
-///   `src/components/Form.tsx` → `src/components/Form.tsx` (no change — no
-///     Gradle-style boilerplate)
+///     → `features/dashboard/app/features/dashboard/VM.kt`
+///   `src/components/Form.tsx` → unchanged (no Gradle-style boilerplate)
+///
+/// Note on the `:` → `/` switch: an earlier version used `<module>:<tail>`
+/// to highlight the module boundary visually. Two separate Android-Kotlin
+/// agents read those labels as Gradle `:module:submodule` notation and
+/// noted the format mismatch with their actual `settings.gradle.kts`
+/// declarations. Slashes throughout are honest about what we know:
+/// repo-relative virtual paths, no Gradle-module pretension.
 fn compact_label_path(p: &str) -> String {
     let parts: Vec<&str> = p.split('/').collect();
     let Some(src_i) = parts.iter().position(|s| *s == "src") else {
@@ -445,9 +493,6 @@ fn compact_label_path(p: &str) -> String {
     if src_i == 0 {
         return p.to_string();
     }
-    // After `src/`: skip variant (main/test/...), lang (java/kotlin/...),
-    // package-root chain (com/<org>/<proj>) — 5 segments in Android's
-    // canonical layout. Tolerate shorter paths by bailing out.
     let skip = src_i + 1 + 5;
     if skip > parts.len() {
         return p.to_string();
@@ -464,7 +509,7 @@ fn compact_label_path(p: &str) -> String {
     if tail.is_empty() {
         module_str
     } else {
-        format!("{}:{}", module_str, tail.join("/"))
+        format!("{}/{}", module_str, tail.join("/"))
     }
 }
 
@@ -753,20 +798,20 @@ mod tests {
     fn compact_label_path_examples() {
         assert_eq!(
             compact_label_path("core/src/main/java/com/x/shared/core/constants"),
-            "core:constants",
+            "core/constants",
             "dedup module-tail duplicate"
         );
         assert_eq!(
             compact_label_path("core/src/main/kotlin/com/x/shared/core/domain/usecase"),
-            "core:domain/usecase",
+            "core/domain/usecase",
         );
         assert_eq!(
             compact_label_path("complications/src/main/java/com/x/onewearos/complications/MainComplicationService.kt"),
-            "complications:MainComplicationService.kt"
+            "complications/MainComplicationService.kt"
         );
         assert_eq!(
             compact_label_path("features/dashboard/app/src/main/java/com/x/one/features/dashboard/TodayViewModel.kt"),
-            "features/dashboard/app:features/dashboard/TodayViewModel.kt",
+            "features/dashboard/app/features/dashboard/TodayViewModel.kt",
             "nested modules: no tail dedup (terminal segment is `app`, tail starts with `features`)"
         );
         // Non-Gradle paths pass through unchanged.
@@ -783,6 +828,77 @@ mod tests {
     }
 
     #[test]
+    fn ep_record_gets_hub_annotation_when_also_utility() {
+        let manager = FileIndex {
+            path: "src/Manager.kt".into(),
+            lang: "kt".into(),
+            out_deg: 8,
+            in_deg: 5,
+            defs: vec![make_def("Manager", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        let pure_ep = FileIndex {
+            path: "src/Main.kt".into(),
+            lang: "kt".into(),
+            out_deg: 10,
+            in_deg: 0,
+            defs: vec![make_def("Main", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        let opts = opts_minimal();
+        let files = [manager, pure_ep];
+        let out = render(
+            &files,
+            &[&files[0], &files[1]],
+            &[&files[0]],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &opts,
+        );
+        assert!(
+            out.contains("EP src/Manager.kt:1 Manager (out=8 in=5) [hub]"),
+            "Manager EP record should be marked [hub]:\n{}",
+            out
+        );
+        assert!(
+            out.contains("EP src/Main.kt:1 Main (out=10 in=0)\n"),
+            "Pure EP record (no utility overlap) should NOT be marked:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn m_records_dedup_across_source_sets() {
+        // Two raw src dirs that compact to the same label (java + kotlin
+        // source sets in the same Gradle module) → one merged M line.
+        let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+        edges.insert(
+            "core/src/main/java/com/x/shared/core/domain".into(),
+            vec!["core/src/main/java/com/x/shared/core/models".into()],
+        );
+        edges.insert(
+            "core/src/main/kotlin/com/x/shared/core/domain".into(),
+            vec!["core/src/main/kotlin/com/x/shared/core/usecase".into()],
+        );
+        let opts = opts_minimal();
+        let out = render(&[], &[], &[], &edges, &HashMap::new(), &[], &opts);
+        // One M line for `core/domain` with both dsts merged.
+        let m_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with("M core/domain"))
+            .collect();
+        assert_eq!(
+            m_lines.len(),
+            1,
+            "expected one merged line, got: {:?}",
+            m_lines
+        );
+        assert!(m_lines[0].contains("core/models"), "{}", m_lines[0]);
+        assert!(m_lines[0].contains("core/usecase"), "{}", m_lines[0]);
+    }
+
+    #[test]
     fn modules_section_uses_compact_paths() {
         let mut edges: HashMap<String, Vec<String>> = HashMap::new();
         edges.insert(
@@ -792,7 +908,7 @@ mod tests {
         let opts = opts_minimal();
         let out = render(&[], &[], &[], &edges, &HashMap::new(), &[], &opts);
         assert!(
-            out.contains("M core:domain -> core:models"),
+            out.contains("M core/domain -> core/models"),
             "expected compact module paths:\n{}",
             out
         );
@@ -823,7 +939,7 @@ mod tests {
             &opts,
         );
         assert!(
-            out.contains("← app:services/A.kt"),
+            out.contains("← app/services/A.kt"),
             "expected compact caller path:\n{}",
             out
         );
