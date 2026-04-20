@@ -26,4 +26,4 @@ bench: build
 	@bash scripts/bench.sh $(RUST_BIN) $(REPOS)
 
 install:
-	cargo install --path rust
+	cargo install --path rust --force
