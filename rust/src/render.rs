@@ -113,9 +113,13 @@ fn write_header(
     // Soft token warning — char/4 is a rough cl100k_base approximation.
     let approx_tokens = (body.len() + out.len()) / 4;
     if approx_tokens > TOKEN_WARN_THRESHOLD {
+        // Warning emits before the body, so it survives any truncation
+        // by the agent's tool-result preview. Lists actions in order of
+        // most-common-fix-first: agents keep independently inventing
+        // the file-redirect workaround, so put it first.
         writeln!(
             out,
-            "# warning: ~{}k tokens — consider --compact, --skeleton, or --scope PATH",
+            "# warning: ~{}k tokens — exceeds many agent previews. Try `tingle ... > /tmp/map.md && Read /tmp/map.md`, or shrink with --skeleton / --scope PATH",
             approx_tokens / 1000
         )
         .unwrap();
