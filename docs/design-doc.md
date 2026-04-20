@@ -98,13 +98,13 @@ Both matter. Cheap output with equal quality is a win. Higher quality but 3× to
 
 ## Approach
 
-A single Go binary, stateless, writes Markdown to stdout:
+A single Rust binary, stateless, writes a compact tag-prefixed map to stdout:
 
-1. Enumerates files via `git ls-files -com --exclude-standard` (cached, others, modified — minus gitignored). **No-git fallback:** if `.git` is missing, falls back to `filepath.WalkDir` with default ignores (`node_modules`, `dist`, `build`, `.venv`, `venv`, `target`, `.next`, `out`, `coverage`). Applies `.tingleignore` on top either way.
-2. Parses each file in parallel with tree-sitter → `{defs, refs, imports}` per file.
-3. **Import resolution (heuristic).** Path math for relative imports + try common extensions (`.ts`/`.js`/`.py`/`.go`) and index/package files. Optional `--alias PREFIX:PATH` flag applies user-supplied prefix substitutions (`@`→`src/`) before path math. External imports (`@okta/sdk`, `django.db`) and unmapped aliases still render raw. Full config-parsing (tsconfig, go.mod, etc.) is post-MVP.
-4. Builds symbol graph → ranks entry points (heuristic, see §Ranking).
-5. Renders Markdown to stdout.
+1. Enumerates files via `git ls-files -com --exclude-standard -z` (cached, others, modified — minus gitignored), deduping (the `-com` union doesn't dedupe — a tracked-and-modified file appears in both `-c` and `-m`). **No-git fallback:** if `.git` is missing, falls back to `walkdir::WalkDir` with default ignores (`node_modules`, `dist`, `build`, `.venv`, `venv`, `target`, `.next`, `out`, `coverage`). Applies `.tingleignore` on top either way.
+2. Parses each file in parallel via `rayon` with tree-sitter (canonical C runtime) → `{defs, imports, package}` per file. Method attachment to enclosing class by byte-range containment.
+3. **Import resolution (heuristic).** Path math for relative imports + extension/index/`__init__.py` trials. Kotlin: `(package, class) → file` index built from parsed files; FQCN imports resolved by longest-prefix match. Display vs graph paths decoupled — the F record's `imp:` shows a compact `<module>/<ClassName>` form, the graph uses the full repo path. `--alias PREFIX:PATH` for manual alias maps. External imports stay raw or, for noisy Kotlin framework deps, collapse to first 2 dot segments.
+4. Builds symbol graph → ranks entry points (heuristic, see §Ranking) and surfaces utilities (in_deg ≥ 2). Files in both EP and U get a `[hub]` annotation.
+5. Renders to stdout. Compact-by-default layout (no per-file def signatures, 1 caller per U); `--full` recovers signatures + 3 callers. M section deduped by compacted form so multi-source-set Gradle modules don't emit duplicate edges.
 
 Agent invocation (any subagent, orchestrator, or top-level agent):
 
@@ -141,12 +141,13 @@ No cache. No `.tingle/` directory. No on-disk state. If the agent's context gets
 
 | Concern         | Choice                                              | Why                                                                |
 | --------------- | --------------------------------------------------- | ------------------------------------------------------------------ |
-| Language        | Go                                                  | Fast cold startup (agents call once per session); easy parallelism |
-| Tree-sitter     | `tree-sitter/go-tree-sitter` (official)             | Maintained; grammars as separate cgo modules                       |
-| Git enumeration | Shell out to `git ls-files -com --exclude-standard` | Faster than go-git; handles ignore rules for free                  |
-| Parallelism     | `errgroup` + GOMAXPROCS worker pool                 | Parsing is CPU-bound                                               |
+| Language        | Rust                                                | Fast cold startup (agents call once per session); native tree-sitter without runtime overhead |
+| Tree-sitter     | `tree-sitter` crate + per-language grammar crates   | Canonical C runtime via Rust bindings; no reimplementation drift   |
+| Git enumeration | Shell out to `git ls-files -com --exclude-standard -z` | Faster than libgit2; handles ignore rules for free; NUL-separated for non-ASCII filenames |
+| Parallelism     | `rayon::par_iter`                                   | Parsing is CPU-bound                                               |
+| Output measurement | `evals/` harness (Claude API + seeded questions)  | Compression decisions gated on agent task quality, not just bytes  |
 
-Note on Go vs TS: repomix proves TS distribution works fine (npm + brew + web). We pick Go for cold startup — an agent invoking the tool once per session pays node/npx startup on every run, and Go is ~instant.
+Originally shipped in Go (v1) and migrated to Rust (v2) — see `docs/v2-rust-rewrite.md` for the migration record. Two known gotreesitter parser bugs (Kotlin `object_declaration`, Python f-string-followed-by-def) closed by the move to canonical C tree-sitter.
 
 ### Ranking (replaces in-degree / PageRank)
 
@@ -166,64 +167,67 @@ Utilities get their own section (`## Core utilities`) ranked _by_ in-degree — 
 
 ### Output format (stdout)
 
-Compact, tag-prefixed, single-line records. Minimal Markdown — just `##` section headers for citability ("see Entry points section"). No backticks, no redundant keywords. Every def carries a line-number anchor so the agent can do `Read(path, line=N)` without a search step.
+Compact, tag-prefixed, single-line records. Minimal Markdown — just `##` section headers for citability. No backticks, no redundant keywords. Every def-bearing record carries a line-number anchor so the agent can do `Read(path, line=N)` without a search step.
+
+Example output (default — compact layout). The Files section uses `### <dir>` group headers to factor repeated path prefixes; per-file def signatures are emitted with `--full`.
 
 ```
-# tingle v1  gen=2026-04-17  commit=abc1234  files=142  tokens~4.2k  tokenizer=cl100k_base
-# legend: S=manifest EP=entry U=utility M=module-edge F=file  [M]=modified [untracked]=new-unstaged [test]=test-file  [path:line]=def  f=func c=class m=method
-
-## Manifests
-S package.json  scripts: build=tsc test=jest dev=nodemon lint=eslint
-S package.json  bin: mytool->dist/cli.js  main: dist/index.js
-S go.mod        module=github.com/user/repo  go=1.22
+# tingle 0.1.0  gen=2026-04-19  commit=abc1234  files=166  tokenizer=cl100k_base
+# legend: EP=entry(out=imports-out,in=imports-in) U=utility(in=fan-in) M=module-edge F=file  [M]=modified [test]=test-file  [hub]=both-entry-and-utility
 
 ## Entry points
-EP src/main.ts:12 bootstrap (out=14 in=0)
 EP cmd/server/main.go:3 main (out=9 in=0)
+EP wear/.../WearTodayViewModel.kt:27 WearTodayViewModel (out=8 in=2) [hub]
 
 ## Utilities
-U src/utils/date.ts:4 formatDate (in=23)
-U src/log/index.ts:2 logger (in=19)
+U core/.../FastingDataItem.kt (in=27)  ← app/services/FastingStateListenerService.kt (+26 more)
+U core/.../FastingGoalsConstants.kt (in=26)  ← complications/MainComplicationService.kt (+25 more)
 
 ## Modules
-M src/app -> src/auth src/store src/ui
-M src/auth -> src/store
+M app -> app/core/components app/navigation core/notifications widget
+M core/abstraction -> core/data/db
+M features/dashboard/app -> core/constants core/domain/repository core/models
 
 ## Files
-F src/main.ts [M] imp: ./auth/login ./store ./ui/root
- 12 f bootstrap() -> Promise<void>
+### src/auth
+F login.ts   imp: ../store @okta/sdk
+### src
+F main.ts [M]  imp: ./auth/login ./store
+F components/Button.tsx  imp: react
+```
+
+With `--full`, signatures appear under each F record:
+
+```
+F src/main.ts [M]  imp: ./auth/login ./store
+ 12 f bootstrap () -> Promise<void>
  18 c App
-  25 m start() -> void
-  42 m stop() -> void
-
-F src/auth/login.test.ts [test] imp: ../login ./fixtures
- 3 f makeMockUser() -> User
-
-F src/auth/login.ts  imp: ../store @okta/sdk @/config/env
- 5  c AuthService
-  8  m login(user, pass) -> Promise<Session>
-  20 m logout() -> void
-
-F src/components/Button.tsx  imp: @/utils/classnames react
- 5 f Button(props) -> JSX.Element
+  25 m start () -> void
+  42 m stop () -> void
 ```
 
 Design notes:
 
-- Legend at line 2 teaches the format once; prefix-cached across invocations in the same session.
-- No bodies. If the agent needs one, it opens the source file at the anchored line.
-- **Activity tags.** Modified tracked files tagged `[M]`; new-untracked files tagged `[untracked]`; test files (path-matched `.test.`, `.spec.`, `__tests__/`, `_test.go`) tagged `[test]` so the agent can deprioritize them when looking for production code. Git-log-based `[hot]` tag → post-MVP.
-- **Manifest surface (`S` records).** Top-of-output summary of `package.json` (scripts, bin, main) and `go.mod` (module path). Architect feedback: "the scripts block alone saves me a Read every time." `pyproject.toml`/`Cargo.toml` → post-MVP. If no manifest is detected (pure Python repo with no `pyproject.toml`, scratch folder, etc.), the `## Manifests` section is omitted entirely rather than rendered empty.
-- **Unresolved imports stay raw.** Two different failure modes render the same way on `imp:` lines:
-  - **External packages** (`@okta/sdk`, `react`, `django.db`) — never resolve to repo-internal files; they stay raw forever. Correct behavior.
-  - **Aliased imports** (`@/config/env`, `@/utils/classnames` via tsconfig `paths`) — _could_ resolve if we knew the mapping. MVP offers `--alias PREFIX:PATH` (e.g. `--alias '@:src'`) as a manual override when the caller knows the aliases. Full config-parsing post-MVP.
-
-  Without `--alias`, both failure modes contribute to missing `M` module graph edges on alias-heavy repos. Agent can still grep the raw path if needed.
-
-- **`--no-legend`.** Legend line (`# legend: ...`) is ~80 tokens. Same-session re-invocations can pass `--no-legend` to skip emitting it. Micro-optimization; useful when an agent runs `tingle` repeatedly and prefix caching isn't helping.
-- **Filenames carry information and are never folded by default.** `auth.ts`, `UserProfile.tsx`, `migrations/0042_users.sql` are structural signals on their own. `--max-depth` / `--expand` exist as opt-in escape valves for unusually large repos, not as a default.
-- **Soft token warning.** When output exceeds a threshold (default 20k tokens), the header adds a line: `# warning: 32k tokens — consider --max-depth N`. No automatic pruning; agent decides. Beats Gemini's auto-truncate-at-5k approach because truncation hides filenames, which are information.
-- Validate empirically in Spike B: measure tokens + task quality, not "looks nice."
+- **Anchor vs label paths.** Two distinct path categories with different rules:
+  - *Anchors* (EP records, U record paths, F record paths, `### <dir>` headers) stay full and accurate — the agent uses them with `Read(path, line=N)`.
+  - *Labels* (M record dirs, U record caller lists) are architecture signals — the agent never `Read`s a directory or a caller. Compressed via `compact_label_path` to strip Gradle source-root boilerplate (`<module>/src/main/<lang>/com/<org>/<proj>/`) → `<module>/<tail>` form.
+- **Compact-by-default.** F records list paths/imports/tags only; U records show 1 caller. The eval harness on three real repos showed this preserves agent task quality (mean ≥ 0.97) at 47-58% of the token cost vs the previous default. `--full` recovers per-file signatures + 3 callers per U record.
+- **Module-grouped F section.** Files grouped by parent directory; each group emits `### <dir>` then F records using basename only. Singleton groups (one file per dir) skip the header — the `###` would cost more tokens than it saves. Agents reconstruct full paths by concatenating the nearest preceding `###` with the basename.
+- **Hub annotation.** Files that qualify as BOTH Entry Points AND Utilities (Manager/Coordinator-style orchestrators with high `out_deg` AND high `in_deg`) get `[hub]` inline on the EP record. Surfaces the dual role without forcing the agent to compare numbers across sections.
+- **Activity tags.** Modified tracked files tagged `[M]`; new-untracked files tagged `[untracked]`; test files (`.test.`, `.spec.`, `__tests__/`, `_test.go`, Android Gradle `/src/test/` and `/src/androidTest/`) tagged `[test]`. Tests are excluded from the Entry Points ranking — they're probes of entries, not entries.
+- **Manifest surface (`S` records).** `package.json` (scripts, bin, main) and `go.mod` (module path). If no manifest detected, `## Manifests` is omitted entirely — never rendered empty. Per-language manifests (`build.gradle.kts`, `Cargo.toml`, `pyproject.toml`) intentionally NOT parsed — see §Non-goals.
+- **Unresolved imports stay raw or collapse.**
+  - *External packages* (`@okta/sdk`, `react`, `django.db`) — never resolve to repo-internal files; stay raw.
+  - *Aliased imports* (`@/config/env` via tsconfig `paths`) — `--alias PREFIX:PATH` is a manual override.
+  - *Verbose framework imports* in Kotlin (`androidx.compose.foundation.background`) — collapse to first 2 dot segments (`androidx.compose`). Kotlin only — Python's `django.db.models` carries signal in the middle segments and stays uncollapsed.
+- **Kotlin FQCN resolution.** `package` headers from `.kt`/`.kts` files build a `(package, class) → file` index. FQCN imports resolve via longest-prefix match for the graph; the F record's import display uses a compact `<module>/<ClassName>` form (the full repo path would be longer than the FQCN itself).
+- **Context-aware legend.** Only mentions section prefixes (`S=`/`EP=`/`U=`/`M=`/`F=`), tag categories (`[M]`/`[untracked]`/`[test]`/`[hub]`), and def-kind markers (`f=func` etc.) that actually appear in THIS run's body. Numeric semantics (`out=imports-out`, `in=fan-in`) are defined inline on the EP/U markers.
+- **Soft token warning.** When output exceeds ~20k tokens (char/4 approximation), the header adds: `# warning: ~Nk tokens — consider --compact, --skeleton, or --scope PATH`. No automatic pruning; agent decides which knob to reach for.
+- **`--no-legend`.** Legend is ~50 tokens; agents in re-invocation loops can skip.
+- **`--scope PATH`** filters the F section to a subtree. Top sections (Manifests/EP/U/M) still render whole-repo context.
+- **`--skeleton`** drops the F section entirely — architecture layer only. Eval shows ~10% quality loss on questions that require per-file detail; useful as a first-pass on very large repos.
+- **No bodies.** If the agent needs source, it opens the file at the anchored line. No exception.
+- **Validate empirically.** Compression decisions are gated on `evals/` (rate–distortion measurement on real questions), not intuition.
 
 ### State: none
 
@@ -233,73 +237,74 @@ Rationale: at sub-second parse time, "re-run the CLI" is cheaper than cache inva
 
 If Spike A finds parse time too slow to support "just run it again," the design changes before v1 starts — not a pre-approved v2 escape.
 
-### Go data shapes
+### Data shapes
 
-```go
-type Symbol struct {
-    Name      string
-    Kind      SymbolKind // func, class, const, type, method
-    Signature string     // single-line, no body
-    Line      int
-    Children  []Symbol   // methods under a class
+See `rust/src/model.rs` for the canonical Rust definitions, summarized here for context.
+
+```rust
+pub enum SymbolKind { Func, Class, Method, Type, Interface, Enum }
+
+pub struct Symbol {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub signature: String,   // single-line, name first, no body
+    pub line: u32,           // 1-indexed
+    pub children: Vec<Symbol>,
 }
 
-type FileIndex struct {
-    Path    string
-    Tags    []string  // "M", "test", "untracked" — rendered as [M], [test], [untracked]
-    Imports []string  // repo-relative when resolvable, else verbatim (e.g. "@okta/sdk", "@/foo")
-    Defs    []Symbol
-}
-
-// No Refs field. v1 ranking is file-level (derived from Imports aggregation across
-// Graph.Files), not symbol-level. Symbol-level fan-in is post-v1 scope.
-
-type Graph struct {
-    Files map[string]*FileIndex // the working in-memory repo state
-}
-
-// MapOutput is what the renderer consumes. One struct = one invocation's output.
-type MapOutput struct {
-    Manifests []string    // pre-rendered S records
-    Entries   []string    // pre-rendered EP records, ranked
-    Utilities []string    // pre-rendered U records, ranked by in-degree
-    Edges     []string    // pre-rendered M records (dir → dir)
-    Files     []FileIndex // source for F records; renderer walks Defs for line-numbered sigs
-    Warnings  []string    // rendered as "# warning: ..." lines in header
+pub struct FileIndex {
+    pub path: String,
+    pub ext: String,
+    pub lang: String,                   // "ts", "kt", "go", "" for unsupported
+    pub tags: Vec<String>,              // "test", "M", "untracked"
+    pub defs: Vec<Symbol>,
+    pub imports: Vec<String>,           // DISPLAY string (compact for Kotlin)
+    pub resolved_imports: Vec<String>,  // GRAPH edges (full repo paths)
+    pub package: String,                // Kotlin `package` header; "" elsewhere
+    pub out_deg: u32,
+    pub in_deg: u32,
 }
 ```
+
+`imports` and `resolved_imports` are decoupled because Kotlin resolved paths (`core/src/main/java/com/x/.../Foo.kt`) are several times longer than the FQCN they resolved from. Graph edges need the full path; the F record's display does not. Splitting saved ~15% on the largest test repo with no information loss.
+
+No `Refs` field — v1 ranking is file-level. Symbol-level fan-in is post-v1 scope.
 
 ### CLI surface
 
 ```
-tingle                      # print compact codebase map to stdout
-tingle --max-depth N        # collapse dirs deeper than N; prints summary (e.g. "utils/ [15 files omitted]")
-tingle --expand PATH        # override --max-depth for paths matching PATH (drill-down)
-tingle --stdin              # read file list from stdin (e.g. `git ls-files '*.ts' | tingle --stdin`)
-tingle --alias PREFIX:PATH  # map an import prefix to a repo path; repeatable (e.g. `--alias '@:src' --alias '@app:src/app'`)
-tingle --no-legend          # omit the legend header line (for re-invocations within a session)
+tingle [REPO]                       # default: cwd. Compact layout by default.
+tingle --full [REPO]                # add per-file def signatures + 3 callers/U
+tingle --scope PATH [REPO]          # filter F section to a subtree
+tingle --skeleton [REPO]            # drop F section entirely (architecture only)
+tingle --alias PREFIX:PATH [REPO]   # repeatable; alias-substitute imports
+tingle --no-legend [REPO]           # skip the legend header line
+tingle --version
 ```
 
-`--json`, `--root`, `--remote`, `languages`, `doctor` deferred until someone needs them. No `--force` because there's no cache to force past.
+`--compact` accepted as a hidden no-op for backwards compat — it's now the default. `--max-depth` / `--expand` from the original spec were never implemented; `--scope` + `--skeleton` cover the same use cases more directly.
+
+Deferred indefinitely: `--json`, `--root`, `--remote`, `--force`. No `--force` because there's no cache to force past.
 
 `.tingleignore` is respected if present (repo root), same semantics as `.gitignore`. Applied on top of `git ls-files` filtering.
 
-## v1 — the MVP
+## What ships today
 
-Scoped for side projects. Solid MVP, not a feature-complete parser. If a bullet isn't here, it's in §Discovered scope.
+For implementation details (algorithm, data shapes, signature rendering, anchor/label distinction, etc.), see [`implementation.md`](implementation.md). Quick reference:
 
-- **Binary:** Go, statically compiled, includes tree-sitter grammars for TS/JS, Python, Go, Kotlin, C++. Kotlin was validated in Spike A on a 167-file real Android repo (0 parse errors). Rust explicitly out of v1. Extensions parsed: `.ts` `.tsx` `.js` `.jsx` `.mjs` `.py` `.go` `.kt` `.kts` `.cc` `.cpp` `.cxx` `.h` `.hpp` `.hxx`.
-- **Enumeration:** `git ls-files -com --exclude-standard` plus `.tingleignore` on top. No-git fallback: `filepath.WalkDir` with baked-in default ignores (`node_modules`, `dist`, `build`, `.venv`, `venv`, `target`, `.next`, `out`, `coverage`). `--stdin` accepts a pre-filtered list.
-- **Parsing:** tree-sitter via `tree-sitter/go-tree-sitter` official bindings.
-- **Extraction:** one language-agnostic Go function consumes standard `tags.scm` captures (`@definition.function`, `@definition.class`, `@reference.call`). Adding a language = drop in grammar + `tags.scm`, no Go code.
-- **Import resolution:** heuristic — path math for relative imports + common-extension guessing. Optional `--alias PREFIX:PATH` flag (repeatable) handles user-supplied prefix maps (`@`→`src/`). External imports and unmapped aliases render verbatim. Full config-parsing (tsconfig, go.mod) → post-MVP.
-- **Module graph:** resolved imports aggregated into `dir → dir` edges, emitted as `M` records.
-- **Manifest surface:** parse `package.json` (scripts, bin, main) + `go.mod` (module path). Emit `S` records. `pyproject.toml`/`Cargo.toml` → post-MVP.
-- **Tags:** `[M]` (modified tracked), `[untracked]`, `[test]` (path match on `.test.`, `.spec.`, `__tests__/`, `_test.go`). Git-log-based `[hot]` tag → post-MVP.
-- **Ranking:** equal-weight heuristic — filename conventions + shebangs + manifest-declared entries + (out − in) degree + root-export bonus. Adjust weights only if real use shows bias.
-- **Output:** compact tag-prefixed format (§Output format), stdout, line-number anchors on every def.
-- **CLI:** `tingle`, `tingle --stdin`, `tingle --max-depth N`, `tingle --expand PATH`.
+- **Binary:** Rust, statically compiled, includes canonical C tree-sitter + per-language grammar crates for TS/TSX, JS/JSX/MJS, Python, Go, Kotlin (KT/KTS), C++. Extensions parsed: `.ts` `.tsx` `.js` `.jsx` `.mjs` `.py` `.go` `.kt` `.kts` `.cc` `.cpp` `.cxx` `.h` `.hpp` `.hxx`. Other extensions enumerated only.
+- **Enumeration:** `git ls-files -com --exclude-standard -z` + dedup, plus `.tingleignore` on top. No-git fallback: `walkdir::WalkDir` with baked-in default ignores. Activity tags: `[M]` (modified tracked), `[untracked]`, `[test]` (path match including Android Gradle `/src/test/` and `/src/androidTest/`).
+- **Parsing:** `rayon` parallel, language-agnostic extractor consumes standard aider-style `tags.scm` captures (`@definition.function`, `@name.definition.class`, `@reference.import`, `@name.reference.package` for Kotlin). Adding a language = drop in grammar crate + `.scm` file + one entry in `LANG_DEFS`. No language-specific Rust code in the extractor.
+- **Import resolution:** path math for relative imports + extension/index/`__init__.py` trials. Kotlin FQCN resolution via `(package, class) → file` index. `--alias PREFIX:PATH` for manual prefix maps. Verbose framework imports (Kotlin only) collapse to first 2 dot segments.
+- **Module graph:** resolved imports aggregated into `dir → dir` edges, emitted as `M` records. Deduped by compacted-form so multi-source-set Gradle modules don't double-emit.
+- **Manifest surface:** `package.json` (scripts, bin, main) + `go.mod` (module path) only. Per-language manifest parsing (Gradle, Cargo, pyproject) explicitly out of scope — see §Non-goals.
+- **Ranking:** equal-weight heuristic — filename conventions + shebangs + manifest-declared entries + (out − in) degree + root-export bonus. Test-tagged files excluded. Files in both EP and U get `[hub]` annotation.
+- **Output:** compact-by-default (paths/imports/tags only, 1 caller per U). `--full` recovers per-file signatures + 3 callers per U. Module-grouped F section with `### <dir>` headers. Context-aware legend. Soft token warning >20k.
 - **State:** none. Stateless. Stdout only.
+
+For development:
+
+- **`evals/`**: agent-task-quality harness. Question sets per repo, scored by piping tingle output through `claude --print`. Compression decisions are gated on this — no further compression unless quality holds.
 
 ## Discovered scope (post-MVP)
 
