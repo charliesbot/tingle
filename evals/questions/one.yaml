@@ -1,0 +1,107 @@
+# Eval questions for the `one` Android Kotlin repo.
+#
+# Each question is graded by substring matching the answer against
+# `expected_substrings` (case-insensitive). Score = fraction of expected
+# substrings present. Optional `forbidden_substrings` deducts (caps at 0).
+#
+# Pick questions that test different agent skills:
+#   - Architecture awareness (which module owns what)
+#   - Hub identification (highest fan-in / load-bearing files)
+#   - Entry-point identification
+#   - Sync / data-flow understanding
+#   - Test layout
+#
+# Ground truth is what a person who knows this repo would expect a
+# correct answer to mention. Be conservative — substring match is dumb
+# but reproducible.
+
+- id: entry_points
+  q: |
+    What are the user-facing entry points (Activities, Services, ViewModels)
+    of this Android app? List the main ones with their file paths.
+  expected_substrings:
+    - MainActivity
+    - TodayViewModel
+    - SettingsViewModel
+  min_score: 0.66
+
+- id: highest_fan_in
+  q: |
+    Which file in this codebase has the highest fan-in (i.e., is imported
+    by the most other files)? What does it represent?
+  expected_substrings:
+    - FastingDataItem
+  min_score: 1.0
+
+- id: sync_spine
+  q: |
+    Describe the cross-device sync mechanism. Which classes are involved
+    in keeping phone and Wear OS state in sync?
+  expected_substrings:
+    - BaseFastingListenerService
+    - FastingStateListenerService
+    - WatchFastingStateListenerService
+  min_score: 0.66
+
+- id: data_repository
+  q: |
+    Where is the main fasting-data repository implementation? What
+    interface does it implement?
+  expected_substrings:
+    - FastingDataRepositoryImpl
+    - FastingDataRepository
+  min_score: 1.0
+
+- id: di_framework
+  q: |
+    Which dependency injection framework does this project use, and where
+    are the DI modules defined?
+  expected_substrings:
+    - Koin
+    - SharedModule
+  min_score: 1.0
+
+- id: notification_flow
+  q: |
+    How are notifications scheduled and shown? Name the worker class and
+    the scheduler.
+  expected_substrings:
+    - NotificationWorker
+    - NotificationScheduler
+  min_score: 1.0
+
+- id: dashboard_module
+  q: |
+    What's in the `features/dashboard` module? Describe the main
+    Composable screens and view models.
+  expected_substrings:
+    - TodayScreen
+    - TodayViewModel
+  min_score: 1.0
+
+- id: complications_layer
+  q: |
+    What does the `complications` module do, and what's its main service
+    class?
+  expected_substrings:
+    - MainComplicationService
+    - complication
+  min_score: 1.0
+
+- id: test_layout
+  q: |
+    Where do tests live in this repo? Are they per-module, top-level, or
+    mixed? Name two test files as evidence.
+  expected_substrings:
+    - Test
+    - src/test
+  min_score: 1.0
+
+- id: settings_storage
+  q: |
+    How are user settings persisted? Name the repository implementation
+    and the storage technology.
+  expected_substrings:
+    - SettingsRepositoryImpl
+    - DataStore
+  min_score: 1.0

@@ -25,3 +25,4 @@ coverage.*
 /spikes/b_regex/tingle-regex
 /spikes/b_utility/tingle
 /spikes/d_puregoTS/spike
+evals/results/
