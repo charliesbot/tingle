@@ -46,6 +46,17 @@ Flags compose (`--scope app --skeleton`). The header emits `# warning: ~Nk token
 
 Use `--full` to recover the previous default (per-file signatures, 3 callers per U record) — useful when you want signatures for navigation, e.g. on a small repo where size isn't the constraint.
 
+### When the output exceeds your agent's preview limit
+
+Agent CLIs cap inline tool-result previews at varying sizes (Claude Code, Cursor, etc. all differ). When tingle's output is bigger than your environment's preview, redirect to a file and read it as a normal artifact:
+
+```bash
+tingle /path/to/repo > /tmp/map.md
+# then in your agent: Read('/tmp/map.md')
+```
+
+This isn't tingle-specific — it's the standard answer for any tool whose output you want to consume in pieces. The soft `# warning: ~Nk tokens — consider ...` line in the header is your cue that you'll likely want to do this (or reach for `--skeleton` / `--scope`).
+
 Parsed languages: TypeScript, JavaScript (JSX, MJS), Python, Go, Kotlin (+ KTS), C++. No state, no cache, stdout only. Re-run whenever the repo changes — it's faster than cache invalidation.
 
 ## Output shape
