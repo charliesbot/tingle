@@ -205,6 +205,27 @@ fn build_legend(
         parts.push("[hub]=both-entry-and-utility".to_string());
     }
 
+    // [orphan] marker — only emitted when at least one F record will
+    // carry it. Same scope-aware visibility check the tag categories use.
+    if files_rendered {
+        let scope = opts.scope.trim_start_matches("./").trim_end_matches('/');
+        let entry_paths: std::collections::HashSet<&str> =
+            entries.iter().map(|e| e.path.as_str()).collect();
+        let any_orphan = files.iter().any(|f| {
+            (!f.lang.is_empty() || !f.tags.is_empty())
+                && (scope.is_empty()
+                    || f.path == scope
+                    || f.path.starts_with(&format!("{}/", scope)))
+                && f.in_deg == 0
+                && !f.defs.is_empty()
+                && !entry_paths.contains(f.path.as_str())
+                && !f.tags.iter().any(|t| t == "test")
+        });
+        if any_orphan {
+            parts.push("[orphan]=in=0,not-EP,likely-dead".to_string());
+        }
+    }
+
     // Def-kind markers — only if the F section will actually render defs.
     // Utilities no longer emit inline defs (they'd duplicate F section
     // content). `--compact` drops F-section defs too. In both cases the
@@ -380,6 +401,22 @@ fn build_body(
 
     b.push_str("## Files\n");
 
+    // Orphan = file with defs that nothing imports AND isn't an entry point
+    // AND isn't a test. Usually dead code worth deleting; cheap to surface,
+    // high signal for cleanup workflows.
+    let entry_paths: std::collections::HashSet<&str> =
+        entries.iter().map(|e| e.path.as_str()).collect();
+    let orphan_paths: std::collections::HashSet<&str> = visible
+        .iter()
+        .filter(|f| {
+            f.in_deg == 0
+                && !f.defs.is_empty()
+                && !entry_paths.contains(f.path.as_str())
+                && !f.tags.iter().any(|t| t == "test")
+        })
+        .map(|f| f.path.as_str())
+        .collect();
+
     // Module-grouped F section: group by parent directory, emit `###` per
     // group, render children with basename only. Collapses repeated path
     // prefixes (e.g. `core/src/main/java/com/charliesbot/shared/core/...`)
@@ -393,18 +430,18 @@ fn build_body(
         if dir.is_empty() {
             // Repo-root files: no header, render full path.
             for f in children {
-                write_file_line(&mut b, f, &f.path, opts);
+                write_file_line(&mut b, f, &f.path, opts, &orphan_paths);
             }
         } else if children.len() == 1 {
             // Singleton group: the `### <dir>` header costs more than it
             // saves. Render the lone file with its full path, no header.
             let f = children[0];
-            write_file_line(&mut b, f, &f.path, opts);
+            write_file_line(&mut b, f, &f.path, opts, &orphan_paths);
         } else {
             writeln!(b, "### {}", dir).unwrap();
             for f in children {
                 let name = basename(&f.path);
-                write_file_line(&mut b, f, name, opts);
+                write_file_line(&mut b, f, name, opts, &orphan_paths);
             }
         }
     }
@@ -412,17 +449,38 @@ fn build_body(
     b
 }
 
-fn write_file_line(b: &mut String, f: &FileIndex, display_name: &str, opts: &Options) {
+fn write_file_line(
+    b: &mut String,
+    f: &FileIndex,
+    display_name: &str,
+    opts: &Options,
+    orphan_paths: &std::collections::HashSet<&str>,
+) {
     let mut tag_str = String::new();
     for t in &f.tags {
         tag_str.push('[');
         tag_str.push_str(t);
         tag_str.push(']');
     }
+    if orphan_paths.contains(f.path.as_str()) {
+        tag_str.push_str("[orphan]");
+    }
+    // Cap the imports list with overflow notation. Mirrors the U-record
+    // caller pattern (`(+N more)`). DI-heavy / aggregate files like
+    // `AppModule.kt` carry 20+ imports inline — capping at 10 keeps the
+    // F-line scannable without losing the "yes, this file aggregates a
+    // lot" signal.
+    const IMPORTS_CAP: usize = 10;
     let imps = if f.imports.is_empty() {
         String::new()
-    } else {
+    } else if f.imports.len() <= IMPORTS_CAP {
         format!("  imp: {}", f.imports.join(" "))
+    } else {
+        format!(
+            "  imp: {} (+{} more)",
+            f.imports[..IMPORTS_CAP].join(" "),
+            f.imports.len() - IMPORTS_CAP
+        )
     };
     writeln!(b, "F {} {}{}", display_name, tag_str, imps).unwrap();
     if opts.full {
@@ -498,13 +556,22 @@ fn compact_label_path(p: &str) -> String {
         return p.to_string();
     }
     let module = &parts[..src_i];
-    let tail = &parts[skip..];
-    // If the first tail segment duplicates the terminal module segment
-    // (common: module `complications` + package `.complications`), drop it.
-    let tail = match (module.last(), tail.first()) {
-        (Some(m), Some(t)) if m == t => &tail[1..],
-        _ => tail,
-    };
+    let mut tail = &parts[skip..];
+    // Multi-segment tail dedup: find the longest PREFIX of `module` that
+    // matches the head of `tail`, then drop those head segments. Common
+    // patterns:
+    //   module `complications` + tail `complications/Foo.kt` → drop 1
+    //   module `core` + tail `core/utils/DateUtils.kt` → drop 1
+    //   module `features/dashboard/app` + tail
+    //     `features/dashboard/TodayViewModel.kt` → drop 2 (module's shared
+    //     `features/dashboard` prefix mirrors the Kotlin package path)
+    let max_n = module.len().min(tail.len());
+    for n in (1..=max_n).rev() {
+        if module[..n] == tail[..n] {
+            tail = &tail[n..];
+            break;
+        }
+    }
     let module_str = module.join("/");
     if tail.is_empty() {
         module_str
@@ -811,8 +878,20 @@ mod tests {
         );
         assert_eq!(
             compact_label_path("features/dashboard/app/src/main/java/com/x/one/features/dashboard/TodayViewModel.kt"),
-            "features/dashboard/app/features/dashboard/TodayViewModel.kt",
-            "nested modules: no tail dedup (terminal segment is `app`, tail starts with `features`)"
+            "features/dashboard/app/TodayViewModel.kt",
+            "nested module: tail repeats `features/dashboard` from the module — multi-segment dedup strips it"
+        );
+        // Single-segment dedup still works.
+        assert_eq!(
+            compact_label_path("complications/src/main/java/com/x/onewearos/complications/sub/Foo.kt"),
+            "complications/sub/Foo.kt",
+            "module `complications` + tail starting `complications/sub/Foo.kt` → strip the leading `complications`"
+        );
+        // No dedup when tail diverges from module path.
+        assert_eq!(
+            compact_label_path("core/src/main/java/com/x/shared/core/utils/DateUtils.kt"),
+            "core/utils/DateUtils.kt",
+            "module `core` + tail starting `core/utils/...` → strip the leading `core`"
         );
         // Non-Gradle paths pass through unchanged.
         assert_eq!(
@@ -824,6 +903,80 @@ mod tests {
         assert_eq!(
             compact_label_path("core/src/main/java/com/x/shared/core"),
             "core"
+        );
+    }
+
+    #[test]
+    fn orphan_files_tagged_in_f_section() {
+        let live = FileIndex {
+            path: "src/used.ts".into(),
+            lang: "ts".into(),
+            in_deg: 5,
+            defs: vec![make_def("foo", 1, SymbolKind::Func)],
+            ..Default::default()
+        };
+        let dead = FileIndex {
+            path: "src/dead.ts".into(),
+            lang: "ts".into(),
+            in_deg: 0,
+            defs: vec![make_def("bar", 1, SymbolKind::Func)],
+            ..Default::default()
+        };
+        let dead_test = FileIndex {
+            path: "src/dead.test.ts".into(),
+            lang: "ts".into(),
+            in_deg: 0,
+            tags: vec!["test".into()],
+            defs: vec![make_def("baz", 1, SymbolKind::Func)],
+            ..Default::default()
+        };
+        let no_defs = FileIndex {
+            path: "src/empty.ts".into(),
+            lang: "ts".into(),
+            in_deg: 0,
+            ..Default::default()
+        };
+        let opts = opts_minimal();
+        let out = render(
+            &[live, dead, dead_test, no_defs],
+            &[],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &opts,
+        );
+        assert!(out.contains("F dead.ts [orphan]"), "{}", out);
+        assert!(!out.contains("F used.ts [orphan]"), "{}", out);
+        // Tests are NOT orphans (their unused-ness is intentional).
+        assert!(!out.contains("F dead.test.ts [orphan]"), "{}", out);
+        // Files without defs aren't orphans (we have no code-presence to call dead).
+        assert!(!out.contains("F empty.ts [orphan]"), "{}", out);
+    }
+
+    #[test]
+    fn imports_capped_with_overflow() {
+        let mut imports = Vec::new();
+        for i in 0..15 {
+            imports.push(format!("dep{}", i));
+        }
+        let f = FileIndex {
+            path: "src/aggregate.ts".into(),
+            lang: "ts".into(),
+            imports,
+            ..Default::default()
+        };
+        let opts = opts_minimal();
+        let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
+        assert!(
+            out.contains("dep0 dep1 dep2 dep3 dep4 dep5 dep6 dep7 dep8 dep9 (+5 more)"),
+            "{}",
+            out
+        );
+        assert!(
+            !out.contains("dep10"),
+            "should be hidden under overflow:\n{}",
+            out
         );
     }
 
