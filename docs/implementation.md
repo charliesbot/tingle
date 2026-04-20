@@ -157,6 +157,8 @@ utilities(files):
 
 **Test files are excluded from EP** by tag-filter. Tests are probes of entry points, not entries themselves; without the filter, a test importing the system-under-test plus mocks plus fixtures would outrank the production class it tests.
 
+**Orphan detection** runs in render. A file gets the `[orphan]` tag when `in_deg == 0` AND has defs AND not in entry list AND not test-tagged. Useful as "what's not referenced via static imports" — surfaces likely dead code. Limitation: tingle reads import statements only, so files wired through runtime registration (DI containers, AndroidManifest.xml, reflection-based routing, platform-callable Activities/Services/Workers/TileServices) all look orphan even when they're not. Documented honestly in the legend: `[orphan]=no-import-callers(may-be-runtime-registered)`. Agent verifies whether the absence of import edges actually means dead code.
+
 ### Stage 5 — Render (`rust/src/render.rs`)
 
 **Goal:** compact tag-prefixed output to stdout. Section order is invariant; empty sections are omitted.
@@ -211,9 +213,10 @@ M <src-label> -> <dst-label>+            # All labels via compact_label_path,
 ### <parent-dir-anchor>                  # Group header for dirs with ≥2 files;
                                          # singleton dirs skip the header (the
                                          # `###` would cost more than it saves)
-F <basename-or-full-path> <tag-string>  imp: <imports>
-                                         # tags: [M] [untracked] [test] [hub]
-                                         # imports: display strings
+F <basename-or-full-path> <tag-string>  imp: <imports> (+N more)?
+                                         # tags: [M] [untracked] [test] [hub] [orphan]
+                                         # imports: display strings, capped at 10
+                                         # with `(+N more)` overflow
                                          # No def listings by default;
                                          # `--full` enables them
  <line> <kind> <signature>               # Only with --full; one space prefix

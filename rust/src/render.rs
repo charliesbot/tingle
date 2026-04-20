@@ -222,7 +222,12 @@ fn build_legend(
                 && !f.tags.iter().any(|t| t == "test")
         });
         if any_orphan {
-            parts.push("[orphan]=in=0,not-EP,likely-dead".to_string());
+            // Honest framing — tingle reads static imports only, so files
+            // wired through runtime registration (DI, manifests, reflection,
+            // platform-callable Services/Activities/Workers) look orphan
+            // even when they're not. The tag flags "no inbound import
+            // edge"; the agent verifies whether that means dead code.
+            parts.push("[orphan]=no-import-callers(may-be-runtime-registered)".to_string());
         }
     }
 
