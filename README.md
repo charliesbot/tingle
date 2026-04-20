@@ -27,23 +27,24 @@ make bench     # hyperfine + RSS on the configured REPOS
 ```bash
 tingle                                # print compact map to stdout (default: cwd)
 tingle /path/to/repo                  # map a specific repo
-tingle --alias '@:src' /path/to/repo  # apply an import alias (repeatable)
-tingle --no-legend /path/to/repo      # skip the legend line (re-invocation)
+tingle --full /path/to/repo           # include per-file def signatures + 3 callers per Utility
 tingle --scope core /path/to/repo     # F section only covers paths under `core/`
-tingle --compact /path/to/repo        # drop per-file def listings (paths + imports only)
 tingle --skeleton /path/to/repo       # omit F section; architecture layer only
+tingle --alias '@:src' /path/to/repo  # apply an import alias (repeatable)
+tingle --no-legend /path/to/repo      # skip the legend line
 tingle --version
 ```
 
-Output-size knobs, smallest first:
+**Default is the compact layout**: F records list paths/imports/tags only and Utility records show 1 caller each. Eval (`evals/`) on three real repos showed this preserves agent task quality (≥0.97 mean score) at 47-58% of the token cost vs `--full`.
 
-- `--scope PATH` — filter the F section to a subtree; architecture layer still whole-repo.
-- `--compact` — drop per-file def listings, keep paths + imports + tags.
-- `--skeleton` — drop the F section entirely.
+Output-size knobs, smallest savings first:
 
-Flags compose (`--scope app --compact`). On the bench's largest repo, `--scope <module> --compact` lands under 7k tokens.
+- `--scope PATH` — filter F section to a subtree; architecture layer still whole-repo.
+- `--skeleton` — drop F section entirely (architecture layer only).
 
-The output header emits `# warning: ~Nk tokens — consider ...` when the result exceeds ~20k tokens, pointing at the right knob.
+Flags compose (`--scope app --skeleton`). The header emits `# warning: ~Nk tokens — consider ...` when output exceeds ~20k tokens.
+
+Use `--full` to recover the previous default (per-file signatures, 3 callers per U record) — useful when you want signatures for navigation, e.g. on a small repo where size isn't the constraint.
 
 Parsed languages: TypeScript, JavaScript (JSX, MJS), Python, Go, Kotlin (+ KTS), C++. No state, no cache, stdout only. Re-run whenever the repo changes — it's faster than cache invalidation.
 

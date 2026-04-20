@@ -88,8 +88,9 @@ for q in questions:
         answer = r.stdout.strip()
     except subprocess.TimeoutExpired:
         answer = "[TIMEOUT]"
-    expected = q.get("expected_substrings", [])
-    forbidden = q.get("forbidden_substrings", [])
+    # Cast to str: YAML can parse `2024` as int, breaking `.lower()`.
+    expected = [str(s) for s in q.get("expected_substrings", [])]
+    forbidden = [str(s) for s in q.get("forbidden_substrings", [])]
     al = answer.lower()
     hits = sum(1 for s in expected if s.lower() in al)
     misses = [s for s in expected if s.lower() not in al]

@@ -16,7 +16,7 @@ mkdir -p "$RESULTS_DIR"
 
 variants=(
   "default::"
-  "compact:--compact:"
+  "full:--full:"
   "skeleton:--skeleton:"
 )
 

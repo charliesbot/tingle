@@ -1,0 +1,80 @@
+# Eval questions for the `charliesbot.dev` Next.js / TSX site.
+
+- id: framework
+  q: |
+    What web framework does this site use? How can you tell from the
+    map?
+  expected_substrings:
+    - Next
+  min_score: 1.0
+
+- id: pages
+  q: |
+    Where do user-facing pages live? Name two specific page files.
+  expected_substrings:
+    - pages/
+    - index.tsx
+  min_score: 1.0
+
+- id: design_system
+  q: |
+    Is there a design-system / shared-component layer? If so, where?
+  expected_substrings:
+    - components/ds
+  min_score: 1.0
+
+- id: most_imported
+  q: |
+    Which design-system component is imported by the most other files?
+  expected_substrings:
+    - Box
+  min_score: 1.0
+
+- id: app_root
+  q: |
+    What's the application root component (the one that wraps every
+    page)?
+  expected_substrings:
+    - _app
+    - App
+  min_score: 1.0
+
+- id: i18n_evidence
+  q: |
+    Is there any evidence of internationalization in this site? Quote a
+    file path as evidence.
+  expected_substrings:
+    - es/
+  min_score: 1.0
+
+- id: mdx_support
+  q: |
+    Does this site support MDX? Name the supporting file(s).
+  expected_substrings:
+    - MDXProvider
+  min_score: 1.0
+
+- id: navbar_dependencies
+  q: |
+    What components does the Navbar component depend on?
+  expected_substrings:
+    - Link
+    - Text
+  min_score: 0.5
+
+- id: deploy_target
+  q: |
+    What deployment platform is this site configured for? Name the
+    package.json script that gives it away.
+  expected_substrings:
+    - vercel
+    - deploy
+  min_score: 1.0
+
+- id: build_scripts
+  q: |
+    What build/test/dev npm scripts are defined?
+  expected_substrings:
+    - build
+    - dev
+  min_score: 1.0

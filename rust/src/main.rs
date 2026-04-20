@@ -47,12 +47,18 @@ struct Args {
     #[arg(long = "skeleton")]
     skeleton: bool,
 
-    /// Drop per-file def listings in the Files section (paths, imports,
-    /// tags only). Also tightens Utilities caller lists to 1 per record.
-    /// Aggressive trim for agents that want the architecture plus a file
-    /// listing without signature-level detail. Composes with --scope.
-    #[arg(long = "compact")]
-    compact: bool,
+    /// Include per-file def listings in the Files section AND show up to 3
+    /// callers per Utility record. Default is the compact layout
+    /// (paths/imports/tags only, 1 caller per U), which preserves agent
+    /// task quality (eval mean ≥0.97 across 3 real repos) at 47-58% of
+    /// the token cost.
+    #[arg(long = "full")]
+    full: bool,
+
+    /// Deprecated: compact is now the default. Accepted as a no-op for
+    /// backwards compatibility with older scripts.
+    #[arg(long = "compact", hide = true)]
+    _compat_compact: bool,
 }
 
 fn main() -> ExitCode {
@@ -125,7 +131,7 @@ fn main() -> ExitCode {
         gen_date,
         scope: args.scope.unwrap_or_default(),
         skeleton: args.skeleton,
-        compact: args.compact,
+        full: args.full,
     };
 
     let out = render::render(

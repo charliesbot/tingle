@@ -1,0 +1,81 @@
+# Eval questions for the `advent-of-code` multi-language repo.
+
+- id: shared_utils
+  q: |
+    Is there a shared utility file used by many puzzle solutions? Name
+    it and report how many files depend on it.
+  expected_substrings:
+    - utils.ts
+  min_score: 1.0
+
+- id: languages
+  q: |
+    What programming languages are represented in this repo? List at
+    least three.
+  expected_substrings:
+    - .ts
+    - .cc
+  min_score: 1.0
+
+- id: years
+  q: |
+    Which years (2018, 2020, 2021, etc.) have puzzle solutions?
+  expected_substrings:
+    - 2020
+    - 2024
+  min_score: 1.0
+
+- id: cpp_year
+  q: |
+    Which year(s) include C++ solutions?
+  expected_substrings:
+    - 2022
+  min_score: 1.0
+
+- id: cpp_utility
+  q: |
+    Is there a shared utility for the C++ solutions? Where?
+  expected_substrings:
+    - file_reader
+  min_score: 1.0
+
+- id: deno_vs_bun
+  q: |
+    The repo has both `utils.deno.ts` and `utils_bun.ts`. What does
+    the existence of both suggest?
+  expected_substrings:
+    - deno
+    - bun
+  min_score: 1.0
+
+- id: parts_pattern
+  q: |
+    For most puzzles there are two files like `dayNN.ts` and
+    `dayNN.part2.ts`. What does that pattern represent?
+  expected_substrings:
+    - part
+  min_score: 1.0
+
+- id: typescript_2024
+  q: |
+    Where do the 2024 TypeScript solutions live, and is each day's
+    code organized in its own subfolder?
+  expected_substrings:
+    - 2024/typescript
+    - day
+  min_score: 1.0
+
+- id: parser_pattern_2025
+  q: |
+    The 2025 TypeScript solutions follow a different shared-utility
+    pattern than earlier years. Describe it briefly.
+  expected_substrings:
+    - parser
+  min_score: 1.0
+
+- id: kotlin
+  q: |
+    Are there any Kotlin solutions in this repo? Name a year or file.
+  expected_substrings:
+    - .kt
+  min_score: 1.0
