@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
+use crate::lang::jvm::compact_label_path;
 use crate::model::{FileIndex, Symbol};
 
 #[derive(Default, Clone)]
@@ -573,64 +574,6 @@ fn parent_dir(p: &str) -> String {
     }
 }
 
-/// Compact a repo path for **label** use (M records, U caller lists) where
-/// the path is informational, not an anchor for downstream Read. Strips
-/// Gradle source-root boilerplate — `src/main/<lang>/com/<org>/<proj>` —
-/// producing `<module>/<tail>` form (slashes throughout — see Note below).
-///
-/// Anchors (F records, EP records, U record paths) must NOT use this —
-/// the agent needs the full path to Read the file.
-///
-/// Examples:
-///   `core/src/main/java/com/charliesbot/shared/core/constants` → `core/constants`
-///   `app/src/main/kotlin/com/x/one/data/Foo.kt` → `app/data/Foo.kt`
-///   `features/dashboard/app/src/main/java/com/x/one/features/dashboard/VM.kt`
-///     → `features/dashboard/app/features/dashboard/VM.kt`
-///   `src/components/Form.tsx` → unchanged (no Gradle-style boilerplate)
-///
-/// Note on the `:` → `/` switch: an earlier version used `<module>:<tail>`
-/// to highlight the module boundary visually. Two separate Android-Kotlin
-/// agents read those labels as Gradle `:module:submodule` notation and
-/// noted the format mismatch with their actual `settings.gradle.kts`
-/// declarations. Slashes throughout are honest about what we know:
-/// repo-relative virtual paths, no Gradle-module pretension.
-fn compact_label_path(p: &str) -> String {
-    let parts: Vec<&str> = p.split('/').collect();
-    let Some(src_i) = parts.iter().position(|s| *s == "src") else {
-        return p.to_string();
-    };
-    if src_i == 0 {
-        return p.to_string();
-    }
-    let skip = src_i + 1 + 5;
-    if skip > parts.len() {
-        return p.to_string();
-    }
-    let module = &parts[..src_i];
-    let mut tail = &parts[skip..];
-    // Multi-segment tail dedup: find the longest PREFIX of `module` that
-    // matches the head of `tail`, then drop those head segments. Common
-    // patterns:
-    //   module `complications` + tail `complications/Foo.kt` → drop 1
-    //   module `core` + tail `core/utils/DateUtils.kt` → drop 1
-    //   module `features/dashboard/app` + tail
-    //     `features/dashboard/TodayViewModel.kt` → drop 2 (module's shared
-    //     `features/dashboard` prefix mirrors the Kotlin package path)
-    let max_n = module.len().min(tail.len());
-    for n in (1..=max_n).rev() {
-        if module[..n] == tail[..n] {
-            tail = &tail[n..];
-            break;
-        }
-    }
-    let module_str = module.join("/");
-    if tail.is_empty() {
-        module_str
-    } else {
-        format!("{}/{}", module_str, tail.join("/"))
-    }
-}
-
 fn count_parsed(files: &[FileIndex]) -> usize {
     files.iter().filter(|f| !f.lang.is_empty()).count()
 }
@@ -909,51 +852,6 @@ mod tests {
             out.contains("# warning:"),
             "expected soft warning line, got:\n{}",
             &out[..out.len().min(400)]
-        );
-    }
-
-    #[test]
-    fn compact_label_path_examples() {
-        assert_eq!(
-            compact_label_path("core/src/main/java/com/x/shared/core/constants"),
-            "core/constants",
-            "dedup module-tail duplicate"
-        );
-        assert_eq!(
-            compact_label_path("core/src/main/kotlin/com/x/shared/core/domain/usecase"),
-            "core/domain/usecase",
-        );
-        assert_eq!(
-            compact_label_path("complications/src/main/java/com/x/onewearos/complications/MainComplicationService.kt"),
-            "complications/MainComplicationService.kt"
-        );
-        assert_eq!(
-            compact_label_path("features/dashboard/app/src/main/java/com/x/one/features/dashboard/TodayViewModel.kt"),
-            "features/dashboard/app/TodayViewModel.kt",
-            "nested module: tail repeats `features/dashboard` from the module — multi-segment dedup strips it"
-        );
-        // Single-segment dedup still works.
-        assert_eq!(
-            compact_label_path("complications/src/main/java/com/x/onewearos/complications/sub/Foo.kt"),
-            "complications/sub/Foo.kt",
-            "module `complications` + tail starting `complications/sub/Foo.kt` → strip the leading `complications`"
-        );
-        // No dedup when tail diverges from module path.
-        assert_eq!(
-            compact_label_path("core/src/main/java/com/x/shared/core/utils/DateUtils.kt"),
-            "core/utils/DateUtils.kt",
-            "module `core` + tail starting `core/utils/...` → strip the leading `core`"
-        );
-        // Non-Gradle paths pass through unchanged.
-        assert_eq!(
-            compact_label_path("src/components/Form.tsx"),
-            "src/components/Form.tsx"
-        );
-        assert_eq!(compact_label_path("README.md"), "README.md");
-        // Path that ends in module boilerplate returns the module alone.
-        assert_eq!(
-            compact_label_path("core/src/main/java/com/x/shared/core"),
-            "core"
         );
     }
 

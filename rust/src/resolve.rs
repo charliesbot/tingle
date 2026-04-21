@@ -1,15 +1,15 @@
 //! Heuristic import resolution.
 //!
 //! - Relative path math + extension + index-file + `__init__.py` trials.
-//! - Kotlin FQCN resolution via a `package → dir → class → file` index built
-//!   from parsed files' `package` headers and `defs`.
-//! - Unresolved dotted imports >2 segments get collapsed to the first two
-//!   segments (cuts `androidx.compose.foundation.background` noise).
+//! - Kotlin FQCN resolution and dotted-import collapse delegated to
+//!   `lang::jvm` — the JVM-ecosystem-specific code lives in one file so
+//!   it's easy to find and easy to change.
 //!
 //! External / unmappable imports that aren't collapsed stay raw.
 
 use std::collections::{HashMap, HashSet};
 
+use crate::lang::jvm;
 use crate::model::FileIndex;
 
 pub type Aliases = HashMap<String, String>;
@@ -27,15 +27,13 @@ const CANDIDATE_EXTS: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", "
 /// the graph but keep a compact FQCN-style string for display.
 pub fn all(files: &mut [FileIndex], aliases: &Aliases) {
     let have: HashSet<String> = files.iter().map(|f| f.path.clone()).collect();
-    let kotlin_index = build_kotlin_index(files);
+    let kotlin_index = jvm::build_kotlin_index(files);
 
     for f in files.iter_mut() {
         let from = f.path.clone();
-        let is_kotlin = matches!(f.ext.as_str(), ".kt" | ".kts");
-        // Dotted-import collapse is Kotlin-only. Other dotted-style import
-        // languages (Python `django.db.models`) carry real signal in the
-        // middle segments that collapse would destroy.
-        let collapse_dotted_fallback = is_kotlin;
+        // Single gate for the JVM-ecosystem code paths. See `lang::jvm`
+        // for everything that switches on this.
+        let is_kotlin = jvm::is_kotlin_ext(&f.ext);
         let mut resolved: Vec<String> = Vec::new();
 
         for imp in f.imports.iter_mut() {
@@ -51,11 +49,11 @@ pub fn all(files: &mut [FileIndex], aliases: &Aliases) {
                 continue;
             }
             // Kotlin FQCN? Resolve for the graph, then render a compact
-            // `<module>:<ClassName>` tag for display — the full repo path
+            // `<module>/<ClassName>` tag for display — the full repo path
             // is much longer than both the FQCN and the display form.
             if is_kotlin {
-                if let Some(r) = resolve_kotlin_fqcn(imp, &kotlin_index) {
-                    let display = kotlin_compact_display(&r);
+                if let Some(r) = jvm::resolve_kotlin_fqcn(imp, &kotlin_index) {
+                    let display = jvm::kotlin_compact_display(&r);
                     resolved.push(r);
                     *imp = display;
                     continue;
@@ -63,8 +61,8 @@ pub fn all(files: &mut [FileIndex], aliases: &Aliases) {
             }
             // Fallback: collapse noisy dotted imports. Kotlin only — other
             // languages preserve full import strings.
-            if collapse_dotted_fallback {
-                if let Some(collapsed) = collapse_dotted(imp) {
+            if is_kotlin {
+                if let Some(collapsed) = jvm::collapse_dotted(imp) {
                     *imp = collapsed;
                 }
             }
@@ -158,160 +156,6 @@ fn clean_join(base: &str, rel: &str) -> String {
         }
     }
     parts.join("/")
-}
-
-// ---- Kotlin FQCN resolution ----
-
-/// Index keyed by Kotlin package FQCN → (class_name → repo-relative path).
-///
-/// Example: `com.foo.bar` → { "Baz" → "src/main/kotlin/com/foo/bar/Baz.kt" }.
-///
-/// Multiple source roots (e.g. `app/src/main/java/...` and
-/// `wear/src/main/java/...` both declaring `package com.x.y`) deduplicate
-/// on class name; first file wins (stable by input file order).
-#[derive(Default)]
-struct KotlinIndex {
-    /// `package` → { `class_name` → `file_path` }.
-    ///
-    /// When the same package is declared in multiple source roots (common in
-    /// Android: `app/src/main/java/...` and `app/src/androidTest/java/...`
-    /// both declare `package com.x`), first-file-wins. File order is
-    /// deterministic per run (git ls-files sort order).
-    by_pkg: HashMap<String, HashMap<String, String>>,
-}
-
-fn build_kotlin_index(files: &[FileIndex]) -> KotlinIndex {
-    let mut idx = KotlinIndex::default();
-    for f in files {
-        if !matches!(f.ext.as_str(), ".kt" | ".kts") {
-            continue;
-        }
-        if f.package.is_empty() {
-            continue;
-        }
-        let entry = idx.by_pkg.entry(f.package.clone()).or_default();
-
-        // Map every top-level def's name to this file. Kotlin allows
-        // multiple declarations per file, so a single file may contribute
-        // several keys.
-        for d in &f.defs {
-            entry
-                .entry(d.name.clone())
-                .or_insert_with(|| f.path.clone());
-        }
-        // Also map the filename-without-extension as a fallback — matches
-        // the common "one public class per file named after it" convention.
-        // `or_insert_with` keeps def-based entries (which have stronger
-        // evidence) from being overwritten.
-        let base = f.path.rsplit_once('/').map(|(_, b)| b).unwrap_or(&f.path);
-        let stem = base
-            .strip_suffix(".kt")
-            .or(base.strip_suffix(".kts"))
-            .unwrap_or(base);
-        entry
-            .entry(stem.to_string())
-            .or_insert_with(|| f.path.clone());
-    }
-    idx
-}
-
-/// Resolve a Kotlin FQCN import like `com.foo.bar.Baz` or
-/// `com.foo.bar.Baz.CONST` to the repo-relative file that declares it.
-fn resolve_kotlin_fqcn(imp: &str, idx: &KotlinIndex) -> Option<String> {
-    let segs: Vec<&str> = imp.split('.').collect();
-    if segs.len() < 2 {
-        return None;
-    }
-    // Try each split point from longest package prefix down to length-2.
-    // For `a.b.c.D` we try:
-    //   package="a.b.c" class="D"   (class import)
-    //   package="a.b"   class="c"   (member import: a.b.c.D where c is the class)
-    //   package="a"     class="b"   (rare — top-level package)
-    for n in (1..segs.len()).rev() {
-        let pkg = segs[..n].join(".");
-        let class = segs[n];
-        if let Some(inner) = idx.by_pkg.get(&pkg) {
-            if let Some(path) = inner.get(class) {
-                return Some(path.clone());
-            }
-        }
-    }
-    None
-}
-
-/// Render a resolved Kotlin import path as `<module>/<ClassName>`.
-///
-/// Takes a repo-relative path like `core/src/main/java/com/ex/shared/Repo.kt`
-/// and returns `core/Repo`. For nested feature modules like
-/// `features/settings/app/src/main/java/.../Foo.kt`, returns
-/// `features/settings/app/Foo` (first path element up to `src/` boundary).
-///
-/// (Slash, not colon: agent feedback noted that `core:data/repository`-style
-/// labels read as Gradle-`:module:`-notation but aren't, causing mental
-/// remapping. Slashes throughout are honest about what we know — these are
-/// repo-relative virtual paths, not Gradle module declarations.)
-fn kotlin_compact_display(resolved_path: &str) -> String {
-    let parts: Vec<&str> = resolved_path.split('/').collect();
-    let filename = parts.last().copied().unwrap_or("");
-    let class_name = filename
-        .strip_suffix(".kt")
-        .or_else(|| filename.strip_suffix(".kts"))
-        .unwrap_or(filename);
-
-    // Module prefix = everything before the first path element that looks
-    // like a source-root marker. Covers both Gradle (`core/src/main/java`)
-    // and Kotlin Multiplatform (`shared/commonMain/kotlin`) layouts.
-    const SOURCE_ROOTS: &[&str] = &[
-        "src",
-        "commonMain",
-        "androidMain",
-        "iosMain",
-        "jvmMain",
-        "jsMain",
-        "nativeMain",
-        "kotlin",
-        "java",
-    ];
-    if parts.len() < 2 {
-        return class_name.to_string();
-    }
-    let boundary = parts
-        .iter()
-        .position(|p| SOURCE_ROOTS.contains(p))
-        .unwrap_or(1);
-    if boundary == 0 {
-        class_name.to_string()
-    } else {
-        format!("{}/{}", parts[..boundary].join("/"), class_name)
-    }
-}
-
-// ---- Dotted-import collapse (noise reduction) ----
-
-/// If an unresolved import has the shape `a.b.c.d[...]` (≥3 dot-separated
-/// segments, each a plain identifier), collapse to `a.b`. Preserves shorter
-/// names (`react`, `os`, `fmt`) and scoped names (`@okta/sdk`) verbatim.
-fn collapse_dotted(imp: &str) -> Option<String> {
-    // Skip paths we already resolved (forward-slash) or scoped packages.
-    if imp.contains('/') || imp.starts_with('@') {
-        return None;
-    }
-    let segs: Vec<&str> = imp.split('.').collect();
-    if segs.len() < 3 {
-        return None;
-    }
-    // Every segment must be an identifier-ish — skip things like version
-    // markers that happen to contain dots.
-    for s in &segs {
-        if s.is_empty()
-            || !s
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            return None;
-        }
-    }
-    Some(format!("{}.{}", segs[0], segs[1]))
 }
 
 #[cfg(test)]
@@ -453,32 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn kotlin_compact_display_handles_nested_modules() {
-        assert_eq!(
-            kotlin_compact_display("core/src/main/java/com/ex/Repo.kt"),
-            "core/Repo"
-        );
-        assert_eq!(
-            kotlin_compact_display("features/settings/app/src/main/java/com/ex/Foo.kt"),
-            "features/settings/app/Foo"
-        );
-        assert_eq!(kotlin_compact_display("NoSrcPath.kt"), "NoSrcPath");
-    }
-
-    #[test]
-    fn kotlin_compact_display_handles_multiplatform_layout() {
-        // KMP: shared/commonMain/kotlin/...
-        assert_eq!(
-            kotlin_compact_display("shared/commonMain/kotlin/com/ex/Foo.kt"),
-            "shared/Foo"
-        );
-        assert_eq!(
-            kotlin_compact_display("shared/androidMain/kotlin/com/ex/Bar.kt"),
-            "shared/Bar"
-        );
-    }
-
-    #[test]
     fn python_dotted_imports_not_collapsed() {
         // `collapse_dotted` must NOT apply to Python — `django.db.models`
         // carries real module signal in the middle segments.
@@ -513,17 +331,6 @@ mod tests {
                 "androidx.compose".to_string(),
                 "kotlinx.coroutines".to_string()
             ]
-        );
-    }
-
-    #[test]
-    fn collapse_leaves_two_segment_imports_alone() {
-        assert_eq!(collapse_dotted("django.db"), None);
-        assert_eq!(collapse_dotted("react"), None);
-        assert_eq!(collapse_dotted("@okta/sdk"), None);
-        assert_eq!(
-            collapse_dotted("django.db.models"),
-            Some("django.db".into())
         );
     }
 }
