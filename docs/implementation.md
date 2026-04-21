@@ -18,6 +18,8 @@ repo path ──▶ enumerate ──▶ parse ──▶ resolve ──▶ rank �
 
 Each stage reads the previous stage's output. No branching, no side effects, no retries.
 
+JVM-ecosystem special-casing (Kotlin FQCN resolution, Gradle source-root path compaction, KMP source-set names, Android Gradle test-set directories, dotted-import collapse) lives in one module — `rust/src/lang/jvm.rs` — that the core stages call into. Grep there to find every per-ecosystem hack tingle does.
+
 ### Stage 1 — Enumerate (`rust/src/enumerate.rs`)
 
 **Goal:** ordered list of candidate files, each tagged with activity state.
@@ -180,7 +182,7 @@ Critical distinction governing every path-rendering decision:
 - **Anchors** are paths the agent will use with `Read(path, line=N)`. They must stay full and accurate. EP records, U record paths, F record paths, and `### <dir>` group headers are anchors.
 - **Labels** are architecture signals. The agent never `Read`s a directory or a U-record's caller list entry. M record dirs and U caller lists are labels.
 
-Only labels can be compressed. `compact_label_path` strips the Gradle source-root boilerplate (`<module>/src/main/<lang>/com/<org>/<proj>/`) from labels; anchors are always full.
+Only labels can be compressed. `compact_label_path` (in `rust/src/lang/jvm.rs`) strips the Gradle source-root boilerplate (`<module>/src/main/<lang>/com/<org>/<proj>/`) from labels; anchors are always full.
 
 #### Section emission
 
@@ -360,7 +362,7 @@ Drop in:
 
 No language-specific Rust code anywhere else. The signature renderer, method attachment, ranking, and rendering are all language-agnostic.
 
-If the language has a non-standard project layout that produces fat boilerplate prefixes (Android Gradle, Kotlin Multiplatform, etc.), `compact_label_path` in `render.rs` may need its source-root marker list updated.
+If the language has a non-standard project layout that produces fat boilerplate prefixes (Android Gradle, Kotlin Multiplatform, etc.), add the per-ecosystem handling under `rust/src/lang/` (see `lang/jvm.rs` for the existing JVM module — `compact_label_path` source roots, FQCN resolution, test-set directories, etc.) rather than embedding checks in the core stages.
 
 ---
 
