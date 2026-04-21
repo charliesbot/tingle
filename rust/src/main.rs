@@ -42,12 +42,17 @@ struct Args {
     repo: Option<PathBuf>,
 
     /// Print the map to stdout instead of writing a file. Use for shell
-    /// pipelines (e.g. `tingle --stdout | jq`).
+    /// pipelines (e.g. `tingle --stdout | jq`). Without this flag, the
+    /// map is written to `<REPO>/.tinglemap.md` and only a status line
+    /// hits stdout.
     #[arg(long = "stdout")]
     stdout: bool,
 
-    /// Write the map to PATH instead of the default `<repo>/.tinglemap.md`.
-    /// Ignored when `--stdout` is set.
+    /// Write the map to PATH instead of the default
+    /// `<REPO>/.tinglemap.md`. Use this only if you want a different
+    /// location than the default — most agents should just rely on
+    /// `<REPO>/.tinglemap.md` and `Read('./.tinglemap.md')`. Ignored
+    /// when `--stdout` is set.
     #[arg(long = "out", value_name = "PATH")]
     out: Option<PathBuf>,
 
@@ -175,9 +180,13 @@ fn main() -> ExitCode {
                 let bytes = map.len();
                 let tokens_k = (bytes as f64 / 4000.0).max(0.1);
                 let rel_display = display_path(&out_path, &repo_abs);
+                // The trailing `Read(...)` hint is for AI agents — many
+                // jump straight from `tingle`'s stdout to the next tool
+                // call; spelling out the literal next command shaves
+                // a turn off the loop.
                 println!(
-                    "wrote {} ({} bytes, ~{:.1}k tokens)",
-                    rel_display, bytes, tokens_k
+                    "wrote {} ({} bytes, ~{:.1}k tokens). Next: Read('{}')",
+                    rel_display, bytes, tokens_k, rel_display
                 );
                 maybe_gitignore_hint(&out_path, &repo_abs);
             }
