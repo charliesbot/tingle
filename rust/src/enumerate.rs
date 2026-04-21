@@ -12,6 +12,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use thiserror::Error;
 use walkdir::WalkDir;
 
+use crate::lang::jvm;
 use crate::model::FileIndex;
 
 #[derive(Debug, Error)]
@@ -176,17 +177,15 @@ fn matches_gitignore(ig: &Gitignore, rel_path: &str) -> bool {
 
 fn is_test_path(p: &str) -> bool {
     let lp = p.to_ascii_lowercase();
+    // Generic conventions live here. Ecosystem-specific test layouts
+    // (Android Gradle source sets) delegate to `lang::jvm`.
     lp.contains(".test.")
         || lp.contains(".spec.")
         || lp.contains("__tests__/")
         || lp.ends_with("_test.go")
         || lp.starts_with("tests/")
         || lp.contains("/tests/")
-        // Android Gradle layout: `src/test/java/...` and `src/androidtest/java/...`.
-        || lp.contains("/src/test/")
-        || lp.contains("/src/androidtest/")
-        || lp.contains("/src/testdebug/")
-        || lp.contains("/src/testrelease/")
+        || jvm::is_android_test_path(&lp)
 }
 
 fn lower_ext(p: &str) -> String {
