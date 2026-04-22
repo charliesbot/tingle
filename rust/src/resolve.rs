@@ -34,6 +34,11 @@ pub fn all(files: &mut [FileIndex], aliases: &Aliases) {
         // Single gate for the JVM-ecosystem code paths. See `lang::jvm`
         // for everything that switches on this.
         let is_kotlin = jvm::is_kotlin_ext(&f.ext);
+        // AndroidManifest.xml carries class FQCNs in its `imports` list
+        // (populated by `parse`). Route them through the same FQCN
+        // resolver Kotlin uses — this is how Activities/Services/
+        // Receivers/Application get counted as live without a code import.
+        let is_manifest = jvm::is_android_manifest_path(&f.path);
         // DI-registration flag must be read from the *original* imports —
         // the FQCN-rewrite loop below strips the `org.koin.` / `dagger.`
         // prefixes the heuristic relies on.
@@ -57,7 +62,9 @@ pub fn all(files: &mut [FileIndex], aliases: &Aliases) {
             // Kotlin FQCN? Resolve for the graph, then render a compact
             // `<module>/<ClassName>` tag for display — the full repo path
             // is much longer than both the FQCN and the display form.
-            if is_kotlin {
+            // Manifest files share this path: their `imports` are class
+            // FQCNs extracted from `android:name=` attributes.
+            if is_kotlin || is_manifest {
                 if let Some(r) = jvm::resolve_kotlin_fqcn(imp, &kotlin_index) {
                     let display = jvm::kotlin_compact_display(&r);
                     resolved.push(r);
@@ -422,6 +429,32 @@ mod tests {
         }];
         all(&mut files, &HashMap::new());
         assert!(!files[0].is_registration);
+    }
+
+    #[test]
+    fn android_manifest_resolves_class_refs_to_kotlin_files() {
+        // AresApplication-style case: the app class is referenced only from
+        // AndroidManifest.xml. Without manifest wiring, it would look orphan.
+        // With the resolver change, the manifest contributes a real edge.
+        let manifest = FileIndex {
+            path: "app/src/main/AndroidManifest.xml".into(),
+            lang: "androidManifest".into(),
+            imports: vec!["com.ex.app.AresApplication".into()],
+            ..Default::default()
+        };
+        let app_class = kt(
+            "app/src/main/java/com/ex/app/AresApplication.kt",
+            "com.ex.app",
+            &["AresApplication"],
+        );
+        let mut files = vec![manifest, app_class];
+        all(&mut files, &HashMap::new());
+        assert_eq!(
+            files[0].resolved_imports,
+            vec!["app/src/main/java/com/ex/app/AresApplication.kt"]
+        );
+        // Display collapses to the compact `<module>/<ClassName>` form.
+        assert_eq!(files[0].imports, vec!["app/AresApplication"]);
     }
 
     #[test]

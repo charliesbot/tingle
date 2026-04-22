@@ -186,7 +186,14 @@ fn build_legend(
             .iter()
             .any(|f| !f.lang.is_empty() || !f.tags.is_empty());
     if files_rendered {
-        sections.push("F=file");
+        // `(N)` after the path is LOC for files tingle parses — surfaces
+        // outsized files (common refactor targets) at a glance.
+        let any_loc = files.iter().any(|f| f.loc > 0);
+        if any_loc {
+            sections.push("F=file(N=loc)");
+        } else {
+            sections.push("F=file");
+        }
     }
     if !sections.is_empty() {
         parts.push(sections.join(" "));
@@ -337,10 +344,15 @@ fn build_body(
             } else {
                 ""
             };
+            let loc_str = if f.loc > 0 {
+                format!(" loc={}", f.loc)
+            } else {
+                String::new()
+            };
             writeln!(
                 b,
-                "EP {}:{} {} (out={} in={}){}",
-                f.path, line, name, f.out_deg, f.in_deg, hub
+                "EP {}:{} {} (out={} in={}{}){}",
+                f.path, line, name, f.out_deg, f.in_deg, loc_str, hub
             )
             .unwrap();
         }
@@ -374,7 +386,12 @@ fn build_body(
                 }
                 s
             };
-            writeln!(b, "U {} (in={}){}", f.path, f.in_deg, caller_str).unwrap();
+            let loc_str = if f.loc > 0 {
+                format!(" loc={}", f.loc)
+            } else {
+                String::new()
+            };
+            writeln!(b, "U {} (in={}{}){}", f.path, f.in_deg, loc_str, caller_str).unwrap();
         }
         b.push('\n');
     }
@@ -507,6 +524,14 @@ fn write_file_line(
     if orphan_paths.contains(f.path.as_str()) {
         tag_str.push_str("[orphan]");
     }
+    // LOC marker — surfaces outsized files at a glance (reviewer asked for
+    // this explicitly: FeedRepositoryImpl at 378, FeedViewModel at 336).
+    // Omitted when we didn't read the file (unsupported extension, loc=0).
+    let loc_str = if f.loc > 0 {
+        format!(" ({})", f.loc)
+    } else {
+        String::new()
+    };
     // Cap the imports list with overflow notation. Mirrors the U-record
     // caller pattern (`(+N more)`). DI-heavy / aggregate files like
     // `AppModule.kt` carry 20+ imports inline — capping at 10 keeps the
@@ -524,7 +549,7 @@ fn write_file_line(
             f.imports.len() - IMPORTS_CAP
         )
     };
-    writeln!(b, "F {} {}{}", display_name, tag_str, imps).unwrap();
+    writeln!(b, "F {}{} {}{}", display_name, loc_str, tag_str, imps).unwrap();
     if opts.full {
         write_defs(b, &f.defs);
     }
@@ -977,6 +1002,46 @@ mod tests {
         assert!(!out.contains("F dead.test.ts [orphan]"), "{}", out);
         // Files without defs aren't orphans (we have no code-presence to call dead).
         assert!(!out.contains("F empty.ts [orphan]"), "{}", out);
+    }
+
+    #[test]
+    fn loc_renders_after_path_when_present() {
+        let f = FileIndex {
+            path: "src/big.ts".into(),
+            lang: "ts".into(),
+            loc: 378,
+            defs: vec![make_def("foo", 1, SymbolKind::Func)],
+            ..Default::default()
+        };
+        let opts = Options {
+            no_legend: false,
+            ..opts_minimal()
+        };
+        let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
+        assert!(out.contains("F src/big.ts (378)"), "{}", out);
+        // Legend advertises `(N=loc)` so agents know the parens are a count.
+        assert!(out.contains("F=file(N=loc)"), "{}", out);
+    }
+
+    #[test]
+    fn loc_omitted_when_zero() {
+        // Files we didn't read (unsupported ext) keep loc=0 — don't emit
+        // `(0)` because it's misleading.
+        let f = FileIndex {
+            path: "src/a.ts".into(),
+            lang: "ts".into(),
+            defs: vec![make_def("foo", 1, SymbolKind::Func)],
+            ..Default::default()
+        };
+        let opts = Options {
+            no_legend: false,
+            ..opts_minimal()
+        };
+        let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
+        assert!(!out.contains("(0)"), "{}", out);
+        // Legend falls back to plain `F=file` when no file has a LOC.
+        assert!(!out.contains("F=file(N=loc)"), "{}", out);
+        assert!(out.contains("F=file"), "{}", out);
     }
 
     #[test]

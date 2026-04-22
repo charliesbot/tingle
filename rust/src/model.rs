@@ -81,6 +81,11 @@ pub struct FileIndex {
     /// `rank::utilities` to discount inbound edges that are wiring, not
     /// logical dependencies.
     pub is_registration: bool,
+    /// Newline-counted line count; 0 for files we didn't read (unsupported
+    /// extensions). Surfaced in F/U/EP records to flag large files at a
+    /// glance — reviewer feedback called out FeedRepositoryImpl (378),
+    /// FeedViewModel (336) as files worth watching.
+    pub loc: u32,
 
     // rank step
     pub out_deg: u32,
