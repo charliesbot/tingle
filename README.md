@@ -8,11 +8,21 @@ See [`docs/design-doc.md`](docs/design-doc.md) for design and [`docs/implementat
 
 ## Install
 
+### Homebrew (macOS, Linux)
+
+```bash
+brew install charliesbot/tap/tingle
+```
+
+Pre-built binaries for Apple Silicon (`aarch64-apple-darwin`) and Linux (`x86_64`, `aarch64`, static musl). Intel Macs aren't covered — build from source below.
+
+### From source
+
 ```bash
 cargo install --path rust
 ```
 
-Drops the binary at `~/.cargo/bin/tingle` — add that directory to your `PATH` if it isn't already (most `rustup` installs do this automatically). After that, `tingle` is a global command.
+Drops the binary at `~/.cargo/bin/tingle` — add that directory to your `PATH` if it isn't already (most `rustup` installs do this automatically).
 
 For development:
 
