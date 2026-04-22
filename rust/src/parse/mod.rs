@@ -246,6 +246,7 @@ pub fn all(repo: &Path, files: &mut [FileIndex], stats: &Stats) {
         f.defs = extracted.defs;
         f.imports = extracted.imports;
         f.package = extracted.package;
+        f.refs = extracted.refs;
         stats.parsed_ok.fetch_add(1, Ordering::Relaxed);
     });
 }

@@ -70,6 +70,17 @@ pub struct FileIndex {
     /// Dot-separated package name for languages with explicit package
     /// headers (Kotlin). Empty for languages without one.
     pub package: String,
+    /// Unqualified symbol names referenced in the file body — call targets,
+    /// type names, leftmost identifiers of navigation chains. Populated for
+    /// languages whose same-package references don't require imports (Kotlin).
+    /// Consumed by `resolve` to produce same-package edges the import list
+    /// can't express.
+    pub refs: Vec<String>,
+    /// True when this file looks like a DI-registration module (Koin/Hilt
+    /// `Module`/`single { ... }`/`@Module`). Set during `resolve`. Used by
+    /// `rank::utilities` to discount inbound edges that are wiring, not
+    /// logical dependencies.
+    pub is_registration: bool,
 
     // rank step
     pub out_deg: u32,

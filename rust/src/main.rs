@@ -136,7 +136,7 @@ fn main() -> ExitCode {
             max_eps: 15,
         },
     );
-    let utilities = rank::utilities(&files);
+    let utilities = rank::utilities(&files, &g.callers);
 
     let gen_date = OffsetDateTime::now_utc()
         .format(&time::format_description::parse("[year]-[month]-[day]").unwrap())

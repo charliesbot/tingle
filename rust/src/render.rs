@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
-use crate::lang::jvm::compact_label_path;
+use crate::lang::jvm::{self, compact_label_path};
 use crate::model::{FileIndex, Symbol};
 
 #[derive(Default, Clone)]
@@ -237,6 +237,7 @@ fn build_legend(
         let scope = opts.scope.trim_start_matches("./").trim_end_matches('/');
         let entry_paths: std::collections::HashSet<&str> =
             entries.iter().map(|e| e.path.as_str()).collect();
+        let kotlin_peers = jvm::kotlin_packages_with_peers(files);
         let any_orphan = files.iter().any(|f| {
             (!f.lang.is_empty() || !f.tags.is_empty())
                 && (scope.is_empty()
@@ -246,6 +247,7 @@ fn build_legend(
                 && !f.defs.is_empty()
                 && !entry_paths.contains(f.path.as_str())
                 && !f.tags.iter().any(|t| t == "test")
+                && !kotlin_peers.contains(&f.package)
         });
         if any_orphan {
             // Honest framing — tingle reads static imports only, so files
@@ -435,8 +437,16 @@ fn build_body(
     // Orphan = file with defs that nothing imports AND isn't an entry point
     // AND isn't a test. Usually dead code worth deleting; cheap to surface,
     // high signal for cleanup workflows.
+    //
+    // Kotlin exception: files in a package with ≥2 members are suppressed.
+    // Same-package peers can call a declaration without an `import`, and
+    // tingle's syntactic capture misses several routing paths (extension
+    // fns, reflection, manifest/DI wiring). Flagging these as orphans was
+    // the single biggest false-positive source on Android/Kotlin repos —
+    // better to stay silent than make a wrong claim.
     let entry_paths: std::collections::HashSet<&str> =
         entries.iter().map(|e| e.path.as_str()).collect();
+    let kotlin_peers = jvm::kotlin_packages_with_peers(files);
     let orphan_paths: std::collections::HashSet<&str> = visible
         .iter()
         .filter(|f| {
@@ -444,6 +454,7 @@ fn build_body(
                 && !f.defs.is_empty()
                 && !entry_paths.contains(f.path.as_str())
                 && !f.tags.iter().any(|t| t == "test")
+                && !kotlin_peers.contains(&f.package)
         })
         .map(|f| f.path.as_str())
         .collect();
@@ -966,6 +977,55 @@ mod tests {
         assert!(!out.contains("F dead.test.ts [orphan]"), "{}", out);
         // Files without defs aren't orphans (we have no code-presence to call dead).
         assert!(!out.contains("F empty.ts [orphan]"), "{}", out);
+    }
+
+    #[test]
+    fn kotlin_package_peers_suppress_orphan_tag() {
+        // Two Kotlin files share `com.ex.feature`. Neither imports the other,
+        // so both have in_deg == 0 even though they may call each other via
+        // same-package resolution (which tingle can't always see). Conservative
+        // policy: don't tag either as orphan.
+        let a = FileIndex {
+            path: "app/src/main/java/com/ex/feature/ScreenA.kt".into(),
+            ext: ".kt".into(),
+            lang: "kt".into(),
+            package: "com.ex.feature".into(),
+            in_deg: 0,
+            defs: vec![make_def("ScreenA", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        let b = FileIndex {
+            path: "app/src/main/java/com/ex/feature/ScreenB.kt".into(),
+            ext: ".kt".into(),
+            lang: "kt".into(),
+            package: "com.ex.feature".into(),
+            in_deg: 0,
+            defs: vec![make_def("ScreenB", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        // A lonely file in its own package is still orphan-eligible.
+        let lonely = FileIndex {
+            path: "app/src/main/java/com/ex/lonely/Solo.kt".into(),
+            ext: ".kt".into(),
+            lang: "kt".into(),
+            package: "com.ex.lonely".into(),
+            in_deg: 0,
+            defs: vec![make_def("Solo", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        let opts = opts_minimal();
+        let out = render(
+            &[a, b, lonely],
+            &[],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &opts,
+        );
+        assert!(!out.contains("ScreenA.kt [orphan]"), "{}", out);
+        assert!(!out.contains("ScreenB.kt [orphan]"), "{}", out);
+        assert!(out.contains("Solo.kt [orphan]"), "{}", out);
     }
 
     #[test]

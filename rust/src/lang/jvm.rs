@@ -85,6 +85,73 @@ pub fn build_kotlin_index(files: &[FileIndex]) -> KotlinIndex {
     idx
 }
 
+/// Resolve an unqualified symbol name against the file's own package.
+/// Same-package references don't require an `import` in Kotlin, so the
+/// import list doesn't capture them — this backfills the missing edges.
+///
+/// Returns the repo-relative file path of the declaring file, or `None`
+/// if the package has no file declaring `name`. Empty `package` never
+/// resolves (top-level / default package files aren't indexed).
+pub fn resolve_same_package_ref(name: &str, package: &str, idx: &KotlinIndex) -> Option<String> {
+    if package.is_empty() {
+        return None;
+    }
+    idx.by_pkg.get(package)?.get(name).cloned()
+}
+
+/// Count distinct files declaring `package`, excluding `self_path`.
+/// Used by the orphan-policy check: a Kotlin file with package peers
+/// can't be proven unused by syntactic analysis (the peers may call it
+/// without an import), so the orphan tag is suppressed.
+pub fn package_peer_count(package: &str, self_path: &str, idx: &KotlinIndex) -> usize {
+    if package.is_empty() {
+        return 0;
+    }
+    let Some(m) = idx.by_pkg.get(package) else {
+        return 0;
+    };
+    let mut paths: std::collections::HashSet<&str> = m.values().map(String::as_str).collect();
+    paths.remove(self_path);
+    paths.len()
+}
+
+/// Kotlin package names that contain ≥2 distinct Kotlin files. Used by the
+/// orphan-policy check: if a file lives in such a package, at least one
+/// sibling exists that could reference it without an import, so we can't
+/// assert orphan on syntactic grounds alone.
+pub fn kotlin_packages_with_peers(files: &[FileIndex]) -> std::collections::HashSet<String> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut seen_paths: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+    for f in files {
+        if !is_kotlin_ext(&f.ext) || f.package.is_empty() {
+            continue;
+        }
+        let paths = seen_paths.entry(f.package.as_str()).or_default();
+        if paths.insert(f.path.as_str()) {
+            *counts.entry(f.package.as_str()).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(k, v)| if v >= 2 { Some(k.to_string()) } else { None })
+        .collect()
+}
+
+/// True if this file's import list shows signs of being a Koin/Hilt/Dagger
+/// DI-registration module. Call BEFORE `resolve::all` mutates `imports` —
+/// Kotlin FQCNs get rewritten to compact display strings that would strip
+/// the `org.koin.` / `dagger.` prefixes this check relies on.
+///
+/// Heuristic, not semantic: we can't tell a DI-wiring file from a file
+/// that just happens to import Koin's `KoinComponent` for injection.
+/// That's fine — the consumer (`rank::utilities`) uses this as a *soft*
+/// signal to discount inbound edges, not to hide the file.
+pub fn is_registration_imports(imports: &[String]) -> bool {
+    imports
+        .iter()
+        .any(|i| i.starts_with("org.koin.") || i.starts_with("dagger."))
+}
+
 /// Resolve a Kotlin FQCN import like `com.foo.bar.Baz` or
 /// `com.foo.bar.Baz.CONST` to the repo-relative file that declares it.
 pub fn resolve_kotlin_fqcn(imp: &str, idx: &KotlinIndex) -> Option<String> {
