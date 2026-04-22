@@ -17,8 +17,6 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-14
-          - target: x86_64-apple-darwin
-            os: macos-13
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
@@ -111,7 +109,6 @@ jobs:
             cat "dist/tingle-${version}-$1.tar.gz.sha256"
           }
           sha_darwin_arm="$(read_sha aarch64-apple-darwin)"
-          sha_darwin_x86="$(read_sha x86_64-apple-darwin)"
           sha_linux_x86="$(read_sha x86_64-unknown-linux-musl)"
           sha_linux_arm="$(read_sha aarch64-unknown-linux-musl)"
 
@@ -127,10 +124,6 @@ jobs:
               on_arm do
                 url "${base}/tingle-${version}-aarch64-apple-darwin.tar.gz"
                 sha256 "${sha_darwin_arm}"
-              end
-              on_intel do
-                url "${base}/tingle-${version}-x86_64-apple-darwin.tar.gz"
-                sha256 "${sha_darwin_x86}"
               end
             end
 
