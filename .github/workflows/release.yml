@@ -112,8 +112,7 @@ jobs:
           sha_linux_x86="$(read_sha x86_64-unknown-linux-musl)"
           sha_linux_arm="$(read_sha aarch64-unknown-linux-musl)"
 
-          mkdir -p tap/Formula
-          cat > tap/Formula/tingle.rb <<EOF
+          cat > tap/tingle.rb <<EOF
           class Tingle < Formula
             desc "Orientation map for AI agents"
             homepage "https://github.com/charliesbot/tingle"
@@ -156,7 +155,12 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/tingle.rb
+          # Clean up the old Formula/ subdirectory layout (matches chai's
+          # root-level convention). Safe no-op once removed.
+          if [ -f Formula/tingle.rb ]; then
+            git rm Formula/tingle.rb
+          fi
+          git add tingle.rb
           if git diff --cached --quiet; then
             echo "No formula changes"
             exit 0
