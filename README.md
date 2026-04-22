@@ -14,8 +14,6 @@ See [`docs/design-doc.md`](docs/design-doc.md) for design and [`docs/implementat
 brew install charliesbot/tap/tingle
 ```
 
-Pre-built binaries for Apple Silicon (`aarch64-apple-darwin`) and Linux (`x86_64`, `aarch64`, static musl). Intel Macs aren't covered — build from source below.
-
 ### From source
 
 ```bash
