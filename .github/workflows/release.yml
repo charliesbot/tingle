@@ -1,0 +1,172 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl-tools
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --manifest-path rust/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          dir="tingle-${version}-${{ matrix.target }}"
+          mkdir -p "$dir"
+          cp "rust/target/${{ matrix.target }}/release/tingle" "$dir/"
+          cp README.md "$dir/"
+          tar -czf "${dir}.tar.gz" "$dir"
+          shasum -a 256 "${dir}.tar.gz" | awk '{print $1}' > "${dir}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tingle-${{ matrix.target }}
+          path: |
+            tingle-*.tar.gz
+            tingle-*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+  homebrew:
+    name: Update homebrew-tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checkout tap
+        uses: actions/checkout@v4
+        with:
+          repository: charliesbot/homebrew-tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Render formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          base="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
+
+          read_sha() {
+            cat "dist/tingle-${version}-$1.tar.gz.sha256"
+          }
+          sha_darwin_arm="$(read_sha aarch64-apple-darwin)"
+          sha_darwin_x86="$(read_sha x86_64-apple-darwin)"
+          sha_linux_x86="$(read_sha x86_64-unknown-linux-musl)"
+          sha_linux_arm="$(read_sha aarch64-unknown-linux-musl)"
+
+          mkdir -p tap/Formula
+          cat > tap/Formula/tingle.rb <<EOF
+          class Tingle < Formula
+            desc "Orientation map for AI agents"
+            homepage "https://github.com/charliesbot/tingle"
+            version "${version}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "${base}/tingle-${version}-aarch64-apple-darwin.tar.gz"
+                sha256 "${sha_darwin_arm}"
+              end
+              on_intel do
+                url "${base}/tingle-${version}-x86_64-apple-darwin.tar.gz"
+                sha256 "${sha_darwin_x86}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "${base}/tingle-${version}-aarch64-unknown-linux-musl.tar.gz"
+                sha256 "${sha_linux_arm}"
+              end
+              on_intel do
+                url "${base}/tingle-${version}-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "${sha_linux_x86}"
+              end
+            end
+
+            uses_from_macos "git"
+
+            def install
+              bin.install "tingle"
+            end
+
+            test do
+              system bin/"tingle", "--version"
+            end
+          end
+          EOF
+
+      - name: Commit and push
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/tingle.rb
+          if git diff --cached --quiet; then
+            echo "No formula changes"
+            exit 0
+          fi
+          git commit -m "tingle ${GITHUB_REF_NAME}"
+          git push
