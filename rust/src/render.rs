@@ -212,28 +212,17 @@ fn build_legend(
         parts.push("[hub]=both-entry-and-utility".to_string());
     }
 
-    // [orphan] marker — only emitted when at least one F record will
-    // carry it.
-    if files_rendered {
-        let entry_paths: std::collections::HashSet<&str> =
-            entries.iter().map(|e| e.path.as_str()).collect();
-        let kotlin_peers = jvm::kotlin_packages_with_peers(files);
-        let any_orphan = files.iter().any(|f| {
-            (!f.lang.is_empty() || !f.tags.is_empty())
-                && f.in_deg == 0
-                && !f.defs.is_empty()
-                && !entry_paths.contains(f.path.as_str())
-                && !f.tags.iter().any(|t| t == "test")
-                && !kotlin_peers.contains(&f.package)
-        });
-        if any_orphan {
-            // Honest framing — tingle reads static imports only, so files
-            // wired through runtime registration (DI, manifests, reflection,
-            // platform-callable Services/Activities/Workers) look orphan
-            // even when they're not. The tag flags "no inbound import
-            // edge"; the agent verifies whether that means dead code.
-            parts.push("[orphan]=no-import-callers(may-be-runtime-registered)".to_string());
-        }
+    // Orphans section + [orphan] cross-reference tag — shared check.
+    // Honest framing: tingle reads static imports only, so files wired
+    // through runtime registration (DI, reflection, platform-callable
+    // Services/Workers) look orphan even when they're not. The tag flags
+    // "no inbound import edge"; the agent verifies whether that means
+    // dead code.
+    let orphans_present = files_rendered && !orphan_files(files, entries).is_empty();
+    if orphans_present {
+        parts.push(
+            "O=orphan(no-import-callers,may-be-runtime-registered)  [orphan]=same-as-O".into(),
+        );
     }
 
     // Def-kind markers — only if the F section will actually render defs.
@@ -272,6 +261,28 @@ fn build_legend(
     } else {
         format!("# legend: {}", parts.join("  "))
     }
+}
+
+/// Files considered orphan by tingle's syntactic pass: visible (has lang
+/// or tags), has defs, zero inbound import edges, not an entry point, not
+/// a test, and — for Kotlin — not in a package with ≥2 members (package
+/// peers may call without an import, so we can't prove orphan). Shared by
+/// the legend check, the Orphans section, and the F-record inline tag.
+fn orphan_files<'a>(files: &'a [FileIndex], entries: &[&FileIndex]) -> Vec<&'a FileIndex> {
+    let entry_paths: std::collections::HashSet<&str> =
+        entries.iter().map(|e| e.path.as_str()).collect();
+    let kotlin_peers = jvm::kotlin_packages_with_peers(files);
+    files
+        .iter()
+        .filter(|f| {
+            (!f.lang.is_empty() || !f.tags.is_empty())
+                && f.in_deg == 0
+                && !f.defs.is_empty()
+                && !entry_paths.contains(f.path.as_str())
+                && !f.tags.iter().any(|t| t == "test")
+                && !kotlin_peers.contains(&f.package)
+        })
+        .collect()
 }
 
 fn build_body(
@@ -403,6 +414,26 @@ fn build_body(
         }
     }
 
+    // Orphans — files nothing imports, with defs, not entry / test / same-
+    // package-peer. Promoted to its own section after two independent
+    // reviewers asked for it (inline `[orphan]` on F records wasn't
+    // scannable). Files also carry the inline tag for cross-reference.
+    let orphans = orphan_files(files, entries);
+    if !orphans.is_empty() {
+        let mut sorted = orphans.clone();
+        sorted.sort_by(|a, b| a.path.cmp(&b.path));
+        b.push_str("## Orphans\n");
+        for f in &sorted {
+            let loc_str = if f.loc > 0 {
+                format!(" (loc={})", f.loc)
+            } else {
+                String::new()
+            };
+            writeln!(b, "O {}{}", f.path, loc_str).unwrap();
+        }
+        b.push('\n');
+    }
+
     // Files
     let mut visible: Vec<&FileIndex> = files
         .iter()
@@ -415,30 +446,8 @@ fn build_body(
 
     b.push_str("## Files\n");
 
-    // Orphan = file with defs that nothing imports AND isn't an entry point
-    // AND isn't a test. Usually dead code worth deleting; cheap to surface,
-    // high signal for cleanup workflows.
-    //
-    // Kotlin exception: files in a package with ≥2 members are suppressed.
-    // Same-package peers can call a declaration without an `import`, and
-    // tingle's syntactic capture misses several routing paths (extension
-    // fns, reflection, manifest/DI wiring). Flagging these as orphans was
-    // the single biggest false-positive source on Android/Kotlin repos —
-    // better to stay silent than make a wrong claim.
-    let entry_paths: std::collections::HashSet<&str> =
-        entries.iter().map(|e| e.path.as_str()).collect();
-    let kotlin_peers = jvm::kotlin_packages_with_peers(files);
-    let orphan_paths: std::collections::HashSet<&str> = visible
-        .iter()
-        .filter(|f| {
-            f.in_deg == 0
-                && !f.defs.is_empty()
-                && !entry_paths.contains(f.path.as_str())
-                && !f.tags.iter().any(|t| t == "test")
-                && !kotlin_peers.contains(&f.package)
-        })
-        .map(|f| f.path.as_str())
-        .collect();
+    let orphan_paths: std::collections::HashSet<&str> =
+        orphans.iter().map(|f| f.path.as_str()).collect();
 
     // Module-grouped F section: group by parent directory, emit `###` per
     // group, render children with basename only. Collapses repeated path
@@ -896,6 +905,28 @@ mod tests {
         assert!(!out.contains("F dead.test.ts [orphan]"), "{}", out);
         // Files without defs aren't orphans (we have no code-presence to call dead).
         assert!(!out.contains("F empty.ts [orphan]"), "{}", out);
+        // Dedicated section surfaces the same file as an O record.
+        assert!(out.contains("## Orphans\n"), "{}", out);
+        assert!(out.contains("O src/dead.ts"), "{}", out);
+        assert!(!out.contains("O src/used.ts"), "{}", out);
+        assert!(!out.contains("O src/dead.test.ts"), "{}", out);
+    }
+
+    #[test]
+    fn no_orphans_section_when_none() {
+        // When nothing qualifies, neither the section nor the legend entry
+        // appears.
+        let f = FileIndex {
+            path: "src/a.ts".into(),
+            lang: "ts".into(),
+            in_deg: 1, // not orphan
+            defs: vec![make_def("foo", 1, SymbolKind::Func)],
+            ..Default::default()
+        };
+        let opts = opts_minimal();
+        let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
+        assert!(!out.contains("## Orphans"), "{}", out);
+        assert!(!out.contains("O=orphan"), "{}", out);
     }
 
     #[test]
