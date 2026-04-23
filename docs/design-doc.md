@@ -104,7 +104,7 @@ A single Rust binary, no cache, writes a compact tag-prefixed map to `.tinglemap
 2. Parses each file in parallel via `rayon` with tree-sitter (canonical C runtime) → `{defs, imports, package}` per file. Method attachment to enclosing class by byte-range containment.
 3. **Import resolution (heuristic).** Path math for relative imports + extension/index/`__init__.py` trials. Kotlin: `(package, class) → file` index built from parsed files; FQCN imports resolved by longest-prefix match. Display vs graph paths decoupled — the F record's `imp:` shows a compact `<module>/<ClassName>` form, the graph uses the full repo path. `--alias PREFIX:PATH` for manual alias maps. External imports stay raw or, for noisy Kotlin framework deps, collapse to first 2 dot segments.
 4. Builds symbol graph → ranks entry points (heuristic, see §Ranking) and surfaces utilities (in_deg ≥ 2). Files in both EP and U get a `[hub]` annotation.
-5. Renders to `.tinglemap.md`. One output shape: def signatures under every F record, up to 10 callers per utility, import lists capped at 10 with overflow. M section deduped by compacted form so multi-source-set Gradle modules don't emit duplicate edges.
+5. Renders to `.tinglemap.md`. One output shape: def signatures under every F record, full utility caller list (no truncation), import lists capped at 10 with overflow. M section deduped by compacted form so multi-source-set Gradle modules don't emit duplicate edges.
 
 Agent invocation (any subagent, orchestrator, or top-level agent):
 
@@ -202,7 +202,7 @@ Design notes:
 - **Anchor vs label paths.** Two distinct path categories with different rules:
   - *Anchors* (EP records, U record paths, F record paths, `### <dir>` headers) stay full and accurate — the agent uses them with `Read(path, line=N)`.
   - *Labels* (M record dirs, U record caller lists) are architecture signals — the agent never `Read`s a directory or a caller. Compressed via `compact_label_path` to strip Gradle source-root boilerplate (`<module>/src/main/<lang>/com/<org>/<proj>/`) → `<module>/<tail>` form.
-- **One output shape.** Every F record includes def listings; utility callers show up to 10. Earlier versions toggled this via `--skeleton` / `--full` / `--compact`, all removed: agents consume the map as a file (no bash preview cap), so truncation earned nothing and the flag matrix added noise. Earlier eval data justifying the compact form is preserved in `evals/README.md` for context.
+- **One output shape.** Every F record includes def listings; utility callers show the full list. Earlier versions toggled this via `--skeleton` / `--full` / `--compact`, all removed: agents consume the map as a file (no bash preview cap), so truncation earned nothing and the flag matrix added noise. Earlier eval data justifying the compact form is preserved in `evals/README.md` for context.
 - **Module-grouped F section.** Files grouped by parent directory; each group emits `### <dir>` then F records using basename only. Singleton groups (one file per dir) skip the header — the `###` would cost more tokens than it saves. Agents reconstruct full paths by concatenating the nearest preceding `###` with the basename.
 - **Hub annotation.** Files that qualify as BOTH Entry Points AND Utilities (Manager/Coordinator-style orchestrators with high `out_deg` AND high `in_deg`) get `[hub]` inline on the EP record. Surfaces the dual role without forcing the agent to compare numbers across sections.
 - **Activity tags.** Modified tracked files tagged `[M]`; new-untracked files tagged `[untracked]`; test files (`.test.`, `.spec.`, `__tests__/`, `_test.go`, Android Gradle `/src/test/` and `/src/androidTest/`) tagged `[test]`. Tests are excluded from the Entry Points ranking — they're probes of entries, not entries.
@@ -285,7 +285,7 @@ For implementation details (algorithm, data shapes, signature rendering, anchor/
 - **Module graph:** resolved imports aggregated into `dir → dir` edges, emitted as `M` records. Deduped by compacted-form so multi-source-set Gradle modules don't double-emit.
 - **Manifest surface:** `package.json` (scripts, bin, main) + `go.mod` (module path) only. Per-language manifest parsing (Gradle, Cargo, pyproject) explicitly out of scope — see §Non-goals.
 - **Ranking:** equal-weight heuristic — filename conventions + shebangs + manifest-declared entries + (out − in) degree + root-export bonus. Test-tagged files excluded. Files in both EP and U get `[hub]` annotation.
-- **Output:** single shape — def signatures under every F record, up to 10 callers per U (fan-in ≤ 10 fully enumerated). Module-grouped F section with `### <dir>` headers. Context-aware legend. Soft token warning >8k.
+- **Output:** single shape — def signatures under every F record, full caller list per U (no truncation; three reviewer rounds flagged `+N more` as the biggest blast-radius friction). Module-grouped F section with `### <dir>` headers. Context-aware legend. Soft token warning >8k.
 - **State:** none. Stateless. Writes `.tinglemap.md` by default; `--stdout` for pipelines.
 
 For development:

@@ -199,12 +199,14 @@ EP <full-path>:<line> <name> (out=N in=M) [hub]?
                                           # cleanly as either entry or utility
 
 ## Utilities      (omitted if empty)
-U <full-path> (in=N)  ← <caller-label>+              # Up to 10 callers; fan-in
-                                                     # ≤ 10 fully enumerated so
-                                                     # blast-radius lookups don't
-                                                     # need a grep. Callers use
-                                                     # compact labels (drop Gradle
-                                                     # boilerplate).
+U <full-path> (in=N)  ← <caller-label>+              # Full caller list, no
+                                                     # truncation. Agents read the
+                                                     # map as a file so the extra
+                                                     # KB for high fan-in is worth
+                                                     # eliminating the grep that
+                                                     # +N more used to force.
+                                                     # Labels compact Gradle
+                                                     # source-root boilerplate.
 
 ## Modules        (omitted if no edges)
 M <src-label> -> <dst-label>+            # All labels via compact_label_path,

@@ -349,24 +349,17 @@ fn build_body(
             let caller_str = if cs.is_empty() {
                 String::new()
             } else {
-                // Show up to 10 callers. Utilities with fan-in ≤ 10 are
-                // fully enumerated (no `+N more` forcing a grep for
-                // blast-radius). Above that, we truncate — listing 25
-                // paths adds bytes without meaningfully changing the
-                // agent's action. Caller paths are architecture labels
+                // Full caller list, no truncation. Three reviewer rounds
+                // flagged `+N more` as the biggest friction point for
+                // blast-radius queries on high fan-in utilities — the
+                // agent had to grep anyway to recover the tail. Agents
+                // read the map as a file (no token cap); the few extra
+                // KB for a 27-caller list are worth eliminating the
+                // forced grep. Caller paths are architecture labels
                 // (the utility itself is the anchor), so we compact
                 // Gradle source-root boilerplate.
-                const CALLERS_CAP: usize = 10;
-                let max_show = CALLERS_CAP.min(cs.len());
-                let short: Vec<String> = cs[..max_show]
-                    .iter()
-                    .map(|c| compact_label_path(c))
-                    .collect();
-                let mut s = format!("  ← {}", short.join(" "));
-                if cs.len() > max_show {
-                    s.push_str(&format!(" (+{} more)", cs.len() - max_show));
-                }
-                s
+                let short: Vec<String> = cs.iter().map(|c| compact_label_path(c)).collect();
+                format!("  ← {}", short.join(" "))
             };
             let loc_str = if f.loc > 0 {
                 format!(" loc={}", f.loc)
@@ -910,6 +903,41 @@ mod tests {
         assert!(out.contains("O src/dead.ts"), "{}", out);
         assert!(!out.contains("O src/used.ts"), "{}", out);
         assert!(!out.contains("O src/dead.test.ts"), "{}", out);
+    }
+
+    #[test]
+    fn utility_shows_full_caller_list_uncapped() {
+        // Three reviewer rounds flagged `+N more` as the biggest blast-radius
+        // friction. The cap is gone — all callers appear inline.
+        let util = FileIndex {
+            path: "src/util.ts".into(),
+            lang: "ts".into(),
+            in_deg: 15,
+            ..Default::default()
+        };
+        let mut callers: HashMap<String, Vec<String>> = HashMap::new();
+        let caller_paths: Vec<String> = (0..15).map(|i| format!("src/caller{}.ts", i)).collect();
+        callers.insert("src/util.ts".into(), caller_paths.clone());
+        let files = [util];
+        let opts = opts_minimal();
+        let out = render(
+            &files,
+            &[],
+            &[&files[0]],
+            &HashMap::new(),
+            &callers,
+            &[],
+            &opts,
+        );
+        for c in &caller_paths {
+            assert!(
+                out.contains(c),
+                "caller {} missing from output:\n{}",
+                c,
+                out
+            );
+        }
+        assert!(!out.contains("more)"), "truncation leaked:\n{}", out);
     }
 
     #[test]
