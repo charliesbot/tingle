@@ -179,7 +179,7 @@ utilities(files):
 
 Critical distinction governing every path-rendering decision:
 
-- **Anchors** are paths the agent will use with `Read(path, line=N)`. They must stay full and accurate. EP records, U record paths, F record paths, and `### <dir>` group headers are anchors.
+- **Anchors** are paths the agent will use with `Read(path, line=N)`. They must stay full and accurate. H records, U record paths, F record paths, O records, and `### <dir>` group headers are anchors.
 - **Labels** are architecture signals. The agent never `Read`s a directory or a U-record's caller list entry. M record dirs and U caller lists are labels.
 
 Only labels can be compressed. `compact_label_path` (in `rust/src/lang/jvm.rs`) strips the Gradle source-root boilerplate (`<module>/src/main/<lang>/com/<org>/<proj>/`) from labels; anchors are always full.
@@ -192,21 +192,34 @@ S package.json  scripts: ...
 S package.json  bin: ... main: ...
 S go.mod        module=... go=...
 
-## Entry points   (omitted if empty)
-EP <full-path>:<line> <name> (out=N in=M) [hub]?
-                                          # [hub] only if file ALSO appears in U
-                                          # — orchestrator role doesn't fit
-                                          # cleanly as either entry or utility
+## Hotspots       (omitted if empty)
+H <full-path>:<line> <name> (out=N in=M) [hub]?
+                                          # Formerly "Entry points" — four
+                                          # reviewer rounds found the old
+                                          # name misled agents expecting
+                                          # main()-style nodes. The heuristic
+                                          # blends convention + manifest +
+                                          # shebang + out_deg−in_deg.
+                                          # [hub] only if file ALSO appears
+                                          # in U — orchestrator role.
 
 ## Utilities      (omitted if empty)
-U <full-path> (in=N)  ← <caller-label>+              # Full caller list, no
-                                                     # truncation. Agents read the
-                                                     # map as a file so the extra
-                                                     # KB for high fan-in is worth
-                                                     # eliminating the grep that
-                                                     # +N more used to force.
+U <full-path> (in=N prod=M)? ← <caller-label>+       # Full caller list, no
+                                                     # truncation. `prod=` is
+                                                     # the non-test caller count;
+                                                     # shown only when some
+                                                     # callers are test-tagged
+                                                     # (the prod number is what
+                                                     # matters for blast-radius).
                                                      # Labels compact Gradle
                                                      # source-root boilerplate.
+
+## Orphans        (omitted if empty)
+O <full-path> (loc=N)                    # File with defs that nothing imports
+                                         # AND isn't a hotspot AND isn't a
+                                         # test. May still be wired at runtime
+                                         # (DI, Manifest, reflection) — agent
+                                         # verifies.
 
 ## Modules        (omitted if no edges)
 M <src-label> -> <dst-label>+            # All labels via compact_label_path,
@@ -234,11 +247,13 @@ Only mentions categories that actually appear in this run:
 
 ```
 # legend:
-   {S=manifest}? {EP=entry(out=imports-out,in=imports-in)}?
-   {U=utility(in=fan-in)}? {M=module-edge(src->dst=src-imports-dst)}?
+   {S=manifest}? {H=hotspot(out=imports-out,in=imports-in)}?
+   {U=utility(in=fan-in,prod=non-test-callers)}?
+   {M=module-edge(src->dst=src-imports-dst)}?
    {F=file(N=loc)|F=file}?
+   {O=orphan(no-import-callers,may-be-runtime-registered) [orphan]=same-as-O}?
    {[M]=modified}? {[untracked]=new-unstaged}? {[test]=test-file}?
-   {[hub]=both-entry-and-utility}?
+   {[hub]=both-hotspot-and-utility}?
    {[path:line]=def f=func c=class m=method i=interface t=type e=enum}?
 ```
 

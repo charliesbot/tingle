@@ -2,7 +2,7 @@
 //! not human-first — we optimize for the rate in bits-per-agent-answer,
 //! not for casual readability.
 //!
-//! Section order: Manifests, Entry points, Utilities, Modules, Files.
+//! Section order: Manifests, Hotspots, Utilities, Modules, Orphans, Files.
 //! Empty sections are omitted. The legend line is context-aware — it only
 //! mentions prefix/tag categories that actually appear in THIS run.
 
@@ -39,7 +39,7 @@ const TOKEN_WARN_THRESHOLD: usize = 8_000;
 
 pub fn render(
     files: &[FileIndex],
-    entries: &[&FileIndex],
+    hotspots: &[&FileIndex],
     utilities: &[&FileIndex],
     dir_edges: &HashMap<String, Vec<String>>,
     callers: &HashMap<String, Vec<String>>,
@@ -49,10 +49,10 @@ pub fn render(
     // Two-pass: build body first so we can measure its token footprint,
     // then prepend a header that references the measurement. Stateless
     // and cheap at tingle's scale.
-    let body = build_body(files, entries, utilities, dir_edges, callers, manifests);
+    let body = build_body(files, hotspots, utilities, dir_edges, callers, manifests);
     let mut out = String::new();
     write_header(
-        &mut out, &body, files, entries, utilities, dir_edges, manifests, opts,
+        &mut out, &body, files, hotspots, utilities, dir_edges, manifests, opts,
     );
     out.push_str(&body);
     out
@@ -63,7 +63,7 @@ fn write_header(
     out: &mut String,
     body: &str,
     files: &[FileIndex],
-    entries: &[&FileIndex],
+    hotspots: &[&FileIndex],
     utilities: &[&FileIndex],
     dir_edges: &HashMap<String, Vec<String>>,
     manifests: &[String],
@@ -96,7 +96,7 @@ fn write_header(
     .unwrap();
 
     out.push_str(&build_legend(
-        entries, utilities, dir_edges, manifests, files,
+        hotspots, utilities, dir_edges, manifests, files,
     ));
     out.push('\n');
 
@@ -132,7 +132,7 @@ fn write_header(
 /// where agents see `S=manifest` in the legend but no Manifests section
 /// renders.
 fn build_legend(
-    entries: &[&FileIndex],
+    hotspots: &[&FileIndex],
     utilities: &[&FileIndex],
     dir_edges: &HashMap<String, Vec<String>>,
     manifests: &[String],
@@ -145,14 +145,21 @@ fn build_legend(
     if !manifests.is_empty() {
         sections.push("S=manifest");
     }
-    if !entries.is_empty() {
-        // Defines out=/in= here so agents don't have to guess the
-        // semantics from context (feedback: legend was over-promising
-        // section markers and under-explaining numeric ones).
-        sections.push("EP=entry(out=imports-out,in=imports-in)");
+    if !hotspots.is_empty() {
+        // `hotspot` instead of `entry point`: four reviewer rounds found the
+        // old name misled agents expecting main()-style nodes. The score
+        // blends convention matches, manifest-declared entries, shebangs,
+        // package-root bonus, and out_deg−in_deg, so the top of the section
+        // is often a data-layer file with fat imports, not a runtime entry.
+        sections.push("H=hotspot(out=imports-out,in=imports-in)");
     }
     if !utilities.is_empty() {
-        sections.push("U=utility(in=fan-in)");
+        // `prod=N` appears inline on a U record only when some callers are
+        // test-tagged — the non-test count is what matters for blast-radius.
+        // Documented unconditionally here so agents don't hit an unexplained
+        // field name on repos that happen to have tests. One token's cost
+        // on repos without tests.
+        sections.push("U=utility(in=fan-in,prod=non-test-callers)");
     }
     if !dir_edges.is_empty() {
         // `src -> dst` reads as "src imports from dst" — the arrow points
@@ -202,14 +209,14 @@ fn build_legend(
         }
     }
 
-    // [hub] marker — only emitted when at least one EP record will carry
-    // it (i.e., a file appears in both EP and U).
-    let hub_present = !entries.is_empty()
+    // [hub] marker — only emitted when at least one H record will carry
+    // it (file appears in both Hotspots and Utilities).
+    let hub_present = !hotspots.is_empty()
         && utilities
             .iter()
-            .any(|u| entries.iter().any(|e| e.path == u.path));
+            .any(|u| hotspots.iter().any(|e| e.path == u.path));
     if hub_present {
-        parts.push("[hub]=both-entry-and-utility".to_string());
+        parts.push("[hub]=both-hotspot-and-utility".to_string());
     }
 
     // Orphans section + [orphan] cross-reference tag — shared check.
@@ -218,7 +225,7 @@ fn build_legend(
     // Services/Workers) look orphan even when they're not. The tag flags
     // "no inbound import edge"; the agent verifies whether that means
     // dead code.
-    let orphans_present = files_rendered && !orphan_files(files, entries).is_empty();
+    let orphans_present = files_rendered && !orphan_files(files, hotspots).is_empty();
     if orphans_present {
         parts.push(
             "O=orphan(no-import-callers,may-be-runtime-registered)  [orphan]=same-as-O".into(),
@@ -277,16 +284,16 @@ fn build_legend(
 /// genuinely is unreferenced by syntactic analysis. The "may be
 /// runtime-registered" caveat in the legend remains the appropriate
 /// escape hatch for reflection / DI / Manifest-wired edge cases.
-fn orphan_files<'a>(files: &'a [FileIndex], entries: &[&FileIndex]) -> Vec<&'a FileIndex> {
-    let entry_paths: std::collections::HashSet<&str> =
-        entries.iter().map(|e| e.path.as_str()).collect();
+fn orphan_files<'a>(files: &'a [FileIndex], hotspots: &[&FileIndex]) -> Vec<&'a FileIndex> {
+    let hotspot_paths: std::collections::HashSet<&str> =
+        hotspots.iter().map(|e| e.path.as_str()).collect();
     files
         .iter()
         .filter(|f| {
             (!f.lang.is_empty() || !f.tags.is_empty())
                 && f.in_deg == 0
                 && !f.defs.is_empty()
-                && !entry_paths.contains(f.path.as_str())
+                && !hotspot_paths.contains(f.path.as_str())
                 && !f.tags.iter().any(|t| t == "test")
         })
         .collect()
@@ -294,7 +301,7 @@ fn orphan_files<'a>(files: &'a [FileIndex], entries: &[&FileIndex]) -> Vec<&'a F
 
 fn build_body(
     files: &[FileIndex],
-    entries: &[&FileIndex],
+    hotspots: &[&FileIndex],
     utilities: &[&FileIndex],
     dir_edges: &HashMap<String, Vec<String>>,
     callers: &HashMap<String, Vec<String>>,
@@ -312,16 +319,16 @@ fn build_body(
         b.push('\n');
     }
 
-    // Entry points. EP records that ALSO qualify as utilities (file is
-    // both heavily importing AND heavily imported) get an inline `[hub]`
-    // tag. These are orchestrator/manager files whose role doesn't fit
-    // cleanly as either entry or utility — surfacing the duality saves
-    // the agent from having to compare numbers across sections.
-    if !entries.is_empty() {
+    // Hotspots. H records that ALSO qualify as utilities (file is both
+    // heavily importing AND heavily imported) get an inline `[hub]` tag.
+    // These are orchestrator/manager files whose role doesn't fit cleanly
+    // as either — surfacing the duality saves the agent from comparing
+    // numbers across sections.
+    if !hotspots.is_empty() {
         let utility_paths: std::collections::HashSet<&str> =
             utilities.iter().map(|u| u.path.as_str()).collect();
-        b.push_str("## Entry points\n");
-        for f in entries {
+        b.push_str("## Hotspots\n");
+        for f in hotspots {
             let name = first_def_name(f);
             let line = first_def_line(f);
             let hub = if utility_paths.contains(f.path.as_str()) {
@@ -336,7 +343,7 @@ fn build_body(
             };
             writeln!(
                 b,
-                "EP {}:{} {} (out={} in={}{}){}",
+                "H {}:{} {} (out={} in={}{}){}",
                 f.path, line, name, f.out_deg, f.in_deg, loc_str, hub
             )
             .unwrap();
@@ -349,6 +356,14 @@ fn build_body(
     // zero signal gain. The U record carries path + in_deg + top callers,
     // which is what uniquely surfaces "load-bearing file."
     if !utilities.is_empty() {
+        // Two reviewers flagged that `in=23` on Result.kt is misleading
+        // when 4 of those callers are test files. Precompute the test
+        // paths so each U record can show `prod=N` alongside the total.
+        let test_paths: std::collections::HashSet<&str> = files
+            .iter()
+            .filter(|f| f.tags.iter().any(|t| t == "test"))
+            .map(|f| f.path.as_str())
+            .collect();
         b.push_str("## Utilities\n");
         for f in utilities {
             let empty: Vec<String> = Vec::new();
@@ -373,7 +388,19 @@ fn build_body(
             } else {
                 String::new()
             };
-            writeln!(b, "U {} (in={}{}){}", f.path, f.in_deg, loc_str, caller_str).unwrap();
+            // When some of the inbound callers are test files, show the
+            // prod-only count. A utility with `in=23 prod=19` is materially
+            // less blast-radius-risky than `in=23 prod=23`.
+            let prod_count = cs
+                .iter()
+                .filter(|c| !test_paths.contains(c.as_str()))
+                .count();
+            let in_str = if (prod_count as u32) < f.in_deg {
+                format!("in={} prod={}", f.in_deg, prod_count)
+            } else {
+                format!("in={}", f.in_deg)
+            };
+            writeln!(b, "U {} ({}{}){}", f.path, in_str, loc_str, caller_str).unwrap();
         }
         b.push('\n');
     }
@@ -418,7 +445,7 @@ fn build_body(
     // package-peer. Promoted to its own section after two independent
     // reviewers asked for it (inline `[orphan]` on F records wasn't
     // scannable). Files also carry the inline tag for cross-reference.
-    let orphans = orphan_files(files, entries);
+    let orphans = orphan_files(files, hotspots);
     if !orphans.is_empty() {
         let mut sorted = orphans.clone();
         sorted.sort_by(|a, b| a.path.cmp(&b.path));
@@ -707,7 +734,18 @@ mod tests {
         };
         let opts = opts_minimal();
         let mut callers = HashMap::new();
-        callers.insert("src/util.ts".into(), vec!["src/a.ts".into()]);
+        // Keep in_deg and caller-count consistent so the new `prod=`
+        // branch doesn't fire (this test is about where defs appear).
+        callers.insert(
+            "src/util.ts".into(),
+            vec![
+                "src/a.ts".into(),
+                "src/b.ts".into(),
+                "src/c.ts".into(),
+                "src/d.ts".into(),
+                "src/e.ts".into(),
+            ],
+        );
         let files = [util];
         let out = render(
             &files,
@@ -822,8 +860,8 @@ mod tests {
             &opts,
         );
         assert!(
-            out.contains("EP src/SettingsViewModel.kt:50 SettingsViewModel (out=11 in=1)"),
-            "expected basename-matching def to be the EP label, got:\n{}",
+            out.contains("H src/SettingsViewModel.kt:50 SettingsViewModel (out=11 in=1)"),
+            "expected basename-matching def to be the Hotspot label, got:\n{}",
             out
         );
     }
@@ -853,7 +891,7 @@ mod tests {
         );
         // file_stem("main.go") = "main" → matches the second def
         assert!(
-            out.contains("EP src/main.go:10 main (out=5 in=0)"),
+            out.contains("H src/main.go:10 main (out=5 in=0)"),
             "{}",
             out
         );
@@ -910,6 +948,105 @@ mod tests {
         assert!(out.contains("O src/dead.ts"), "{}", out);
         assert!(!out.contains("O src/used.ts"), "{}", out);
         assert!(!out.contains("O src/dead.test.ts"), "{}", out);
+    }
+
+    #[test]
+    fn utility_shows_prod_count_when_some_callers_are_tests() {
+        // Two reviewers independently flagged test-inflated fan-in.
+        // Result.kt (in=23) actually had 19 prod callers + 4 test. The
+        // U record now shows both: `(in=23 prod=19)`.
+        let util = FileIndex {
+            path: "src/util.ts".into(),
+            lang: "ts".into(),
+            in_deg: 3,
+            ..Default::default()
+        };
+        let prod_caller = FileIndex {
+            path: "src/prod.ts".into(),
+            lang: "ts".into(),
+            ..Default::default()
+        };
+        let test_caller = FileIndex {
+            path: "src/util.test.ts".into(),
+            lang: "ts".into(),
+            tags: vec!["test".into()],
+            ..Default::default()
+        };
+        let another_test = FileIndex {
+            path: "src/other.test.ts".into(),
+            lang: "ts".into(),
+            tags: vec!["test".into()],
+            ..Default::default()
+        };
+        let mut callers: HashMap<String, Vec<String>> = HashMap::new();
+        callers.insert(
+            "src/util.ts".into(),
+            vec![
+                "src/prod.ts".into(),
+                "src/util.test.ts".into(),
+                "src/other.test.ts".into(),
+            ],
+        );
+        let files = [util, prod_caller, test_caller, another_test];
+        let opts = opts_minimal();
+        let out = render(
+            &files,
+            &[],
+            &[&files[0]],
+            &HashMap::new(),
+            &callers,
+            &[],
+            &opts,
+        );
+        assert!(out.contains("U src/util.ts (in=3 prod=1)"), "{}", out);
+    }
+
+    #[test]
+    fn utility_omits_prod_when_no_test_callers() {
+        // If all callers are prod, the `prod=` column is redundant —
+        // keep the record compact.
+        let util = FileIndex {
+            path: "src/util.ts".into(),
+            lang: "ts".into(),
+            in_deg: 2,
+            ..Default::default()
+        };
+        let a = FileIndex {
+            path: "src/a.ts".into(),
+            lang: "ts".into(),
+            ..Default::default()
+        };
+        let b = FileIndex {
+            path: "src/b.ts".into(),
+            lang: "ts".into(),
+            ..Default::default()
+        };
+        let mut callers: HashMap<String, Vec<String>> = HashMap::new();
+        callers.insert(
+            "src/util.ts".into(),
+            vec!["src/a.ts".into(), "src/b.ts".into()],
+        );
+        let files = [util, a, b];
+        let opts = opts_minimal();
+        let out = render(
+            &files,
+            &[],
+            &[&files[0]],
+            &HashMap::new(),
+            &callers,
+            &[],
+            &opts,
+        );
+        assert!(out.contains("U src/util.ts (in=2)"), "{}", out);
+        // Legend always documents `prod=`, but the U record itself
+        // shouldn't carry it when every caller is prod.
+        let u_section_start = out.find("## Utilities").expect("Utilities section");
+        let u_section = &out[u_section_start..];
+        assert!(
+            !u_section.contains("prod="),
+            "U record leaked prod=:\n{}",
+            u_section
+        );
     }
 
     #[test]
@@ -1131,13 +1268,13 @@ mod tests {
             &opts,
         );
         assert!(
-            out.contains("EP src/Manager.kt:1 Manager (out=8 in=5) [hub]"),
-            "Manager EP record should be marked [hub]:\n{}",
+            out.contains("H src/Manager.kt:1 Manager (out=8 in=5) [hub]"),
+            "Manager H record should be marked [hub]:\n{}",
             out
         );
         assert!(
-            out.contains("EP src/Main.kt:1 Main (out=10 in=0)\n"),
-            "Pure EP record (no utility overlap) should NOT be marked:\n{}",
+            out.contains("H src/Main.kt:1 Main (out=10 in=0)\n"),
+            "Pure H record (no utility overlap) should NOT be marked:\n{}",
             out
         );
     }

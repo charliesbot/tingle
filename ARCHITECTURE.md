@@ -6,7 +6,7 @@ Internals reference for `tingle`. For the user-facing surface (install, flags, o
 
 1. Walk the repo; parse each source file with tree-sitter.
 2. Extract top-level defs and imports per file.
-3. Rank files as **entry points** (high imports-out) and **utilities** (high imports-in).
+3. Rank files as **hotspots** (high imports-out, or matching entry conventions) and **utilities** (high imports-in).
 4. Fold module-to-module import edges into the `M` layer.
 5. Emit the ranked sections + per-file records with line anchors.
 

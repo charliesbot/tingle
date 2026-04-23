@@ -95,12 +95,12 @@ fn main() -> ExitCode {
     let g = rank::graph(&mut files);
     let m = manifest::scan(&repo_abs);
 
-    let entries = rank::entry_points(
+    let hotspots = rank::hotspots(
         &files,
-        rank::EntryPointsOpts {
+        rank::HotspotsOpts {
             repo: &repo_abs,
             manifest_ep: &m.entry_targets,
-            max_eps: 15,
+            max_hotspots: 15,
         },
     );
     let utilities = rank::utilities(&files, &g.callers);
@@ -119,7 +119,7 @@ fn main() -> ExitCode {
 
     let map = render::render(
         &files,
-        &entries,
+        &hotspots,
         &utilities,
         &g.dir_edges,
         &g.callers,
