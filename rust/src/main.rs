@@ -13,7 +13,6 @@
 //! tingle --out PATH [REPO]        # write to PATH instead of .tinglemap.md
 //! tingle --alias PREFIX:PATH ...  # import alias substitution
 //! tingle --scope PATH ...         # filter F section to subtree
-//! tingle --skeleton ...           # drop F section (architecture only)
 //! tingle --full ...               # include per-file def signatures
 //! tingle --no-legend ...          # skip the legend line
 //! ```
@@ -69,11 +68,6 @@ struct Args {
     /// whole-repo context.
     #[arg(long = "scope", value_name = "PATH")]
     scope: Option<String>,
-
-    /// Omit the Files section entirely — emit only the architecture
-    /// layer (manifests, entries, utilities, module graph).
-    #[arg(long = "skeleton")]
-    skeleton: bool,
 
     /// Include per-file def listings in the Files section AND show up to 3
     /// callers per Utility record. Default is the compact layout
@@ -150,7 +144,6 @@ fn main() -> ExitCode {
         tokens_approx: 0,
         gen_date,
         scope: args.scope.unwrap_or_default(),
-        skeleton: args.skeleton,
         full: args.full,
         suppress_warning: !args.stdout,
     };

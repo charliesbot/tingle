@@ -18,18 +18,13 @@ Binary: rust/target/release/tingle
 
 ## Output-shrink flags on the largest repo
 
-Demonstrates `--scope` and `--skeleton` on the largest repo — the
-knobs agents reach for when the default output is too big to fit in one
-tool-result turn.
+Demonstrates `--scope` on the largest repo — the knob agents reach for
+when the default output is too big to fit in one tool-result turn.
 
 Largest repo: `one`
 
 | Invocation | Output bytes | Output tokens |
 | --- | --- | --- |
 | default | 35.4 KB | 8.6k |
-| `--compact` | 35.4 KB | 8.6k |
-| `--skeleton` | 12.8 KB | 3.3k |
 | `--scope app` | 16.0 KB | 4.1k |
-| `--scope app --compact` | 16.0 KB | 4.1k |
 | `--scope complications` | 13.3 KB | 3.4k |
-| `--scope complications --compact` | 13.3 KB | 3.4k |

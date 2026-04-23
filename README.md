@@ -22,13 +22,12 @@ tingle --stdout /path/to/repo         # print to stdout instead (for pipelines)
 tingle --out PATH /path/to/repo       # write to a custom path
 tingle --full /path/to/repo           # per-file def signatures + 3 callers per Utility
 tingle --scope core /path/to/repo     # F section only covers paths under `core/`
-tingle --skeleton /path/to/repo       # omit F section; architecture layer only
 tingle --alias '@:src' /path/to/repo  # apply an import alias (repeatable)
 tingle --no-legend /path/to/repo      # skip the legend line
 tingle --version
 ```
 
-Default writes `.tinglemap.md` to the target repo and prints a one-line status (`wrote .tinglemap.md (36528 bytes, ~9.1k tokens)`). Gitignore it — it's a generated artifact and every run regenerates. Use `--full` for richer output on small repos; `--scope` / `--skeleton` to shrink the map on large ones. Flags compose.
+Default writes `.tinglemap.md` to the target repo and prints a one-line status (`wrote .tinglemap.md (36528 bytes, ~9.1k tokens)`). Gitignore it — it's a generated artifact and every run regenerates. Use `--full` for richer output on small repos and `--scope PATH` to shrink the map on large ones. Flags compose.
 
 ## Output format
 

@@ -226,10 +226,9 @@ Design notes:
   - *Verbose framework imports* in Kotlin (`androidx.compose.foundation.background`) — collapse to first 2 dot segments (`androidx.compose`). Kotlin only — Python's `django.db.models` carries signal in the middle segments and stays uncollapsed.
 - **Kotlin FQCN resolution.** `package` headers from `.kt`/`.kts` files build a `(package, class) → file` index. FQCN imports resolve via longest-prefix match for the graph; the F record's import display uses a compact `<module>/<ClassName>` form (the full repo path would be longer than the FQCN itself).
 - **Context-aware legend.** Only mentions section prefixes (`S=`/`EP=`/`U=`/`M=`/`F=`), tag categories (`[M]`/`[untracked]`/`[test]`/`[hub]`), and def-kind markers (`f=func` etc.) that actually appear in THIS run's body. Numeric semantics (`out=imports-out`, `in=fan-in`) are defined inline on the EP/U markers.
-- **Soft token warning.** When output exceeds ~20k tokens (char/4 approximation), the header adds: `# warning: ~Nk tokens — consider --compact, --skeleton, or --scope PATH`. No automatic pruning; agent decides which knob to reach for.
+- **Soft token warning.** When output exceeds ~8k tokens (char/4 approximation), the header adds: `# warning: ~Nk tokens — pipe to a file or zoom in with --scope PATH`. No automatic pruning; agent decides which knob to reach for.
 - **`--no-legend`.** Legend is ~50 tokens; agents in re-invocation loops can skip.
 - **`--scope PATH`** filters the F section to a subtree. Top sections (Manifests/EP/U/M) still render whole-repo context.
-- **`--skeleton`** drops the F section entirely — architecture layer only. Eval shows ~10% quality loss on questions that require per-file detail; useful as a first-pass on very large repos.
 - **No bodies.** If the agent needs source, it opens the file at the anchored line. No exception.
 - **Validate empirically.** Compression decisions are gated on `evals/` (rate–distortion measurement on real questions), not intuition.
 
@@ -280,13 +279,12 @@ No `Refs` field — v1 ranking is file-level. Symbol-level fan-in is post-v1 sco
 tingle [REPO]                       # default: cwd. Compact layout by default.
 tingle --full [REPO]                # add per-file def signatures + 3 callers/U
 tingle --scope PATH [REPO]          # filter F section to a subtree
-tingle --skeleton [REPO]            # drop F section entirely (architecture only)
 tingle --alias PREFIX:PATH [REPO]   # repeatable; alias-substitute imports
 tingle --no-legend [REPO]           # skip the legend header line
 tingle --version
 ```
 
-`--compact` accepted as a hidden no-op for backwards compat — it's now the default. `--max-depth` / `--expand` from the original spec were never implemented; `--scope` + `--skeleton` cover the same use cases more directly.
+`--compact` accepted as a hidden no-op for backwards compat — it's now the default. `--max-depth` / `--expand` / `--skeleton` from earlier specs were removed in favor of `--scope` — keeping a single output shape prevents the "which flag now?" UX the reviewer flagged.
 
 Deferred indefinitely: `--json`, `--root`, `--remote`, `--force`. No `--force` because there's no cache to force past.
 
