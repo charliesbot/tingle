@@ -16,6 +16,11 @@ coverage.*
 *.swp
 *~
 
+# Generated map — every `tingle` run regenerates it, so committing would
+# pin stale diffs to every commit. Matches the `.gitignore` nudge the CLI
+# prints on first encounter.
+.tinglemap.md
+
 # scratch / spike output
 /scratch/
 /spikes/*/out/
