@@ -11,8 +11,9 @@
 //!   - `is_kotlin_ext`         — gate Kotlin-only code paths in `resolve`
 //!   - `KotlinIndex` + `build_kotlin_index` / `resolve_kotlin_fqcn` /
 //!     `kotlin_compact_display` — FQCN resolution + display compaction
-//!   - `resolve_same_package_ref` / `kotlin_packages_with_peers` —
-//!     same-package usage resolution + orphan-policy helper
+//!   - `resolve_same_package_ref` — same-package usage resolution
+//!     (Kotlin omits imports for package peers; this backfills the
+//!     missing graph edges when peer refs are captured via tags.scm)
 //!   - `is_registration_imports` — Koin/Hilt/Dagger DI detection for the
 //!     utility-scoring discount
 //!   - `collapse_dotted`       — fallback for unresolved Kotlin FQCN imports
@@ -110,44 +111,6 @@ pub fn resolve_same_package_ref(name: &str, package: &str, idx: &KotlinIndex) ->
         return None;
     }
     idx.by_pkg.get(package)?.get(name).cloned()
-}
-
-/// Count distinct files declaring `package`, excluding `self_path`.
-/// Used by the orphan-policy check: a Kotlin file with package peers
-/// can't be proven unused by syntactic analysis (the peers may call it
-/// without an import), so the orphan tag is suppressed.
-pub fn package_peer_count(package: &str, self_path: &str, idx: &KotlinIndex) -> usize {
-    if package.is_empty() {
-        return 0;
-    }
-    let Some(m) = idx.by_pkg.get(package) else {
-        return 0;
-    };
-    let mut paths: std::collections::HashSet<&str> = m.values().map(String::as_str).collect();
-    paths.remove(self_path);
-    paths.len()
-}
-
-/// Kotlin package names that contain ≥2 distinct Kotlin files. Used by the
-/// orphan-policy check: if a file lives in such a package, at least one
-/// sibling exists that could reference it without an import, so we can't
-/// assert orphan on syntactic grounds alone.
-pub fn kotlin_packages_with_peers(files: &[FileIndex]) -> std::collections::HashSet<String> {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    let mut seen_paths: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
-    for f in files {
-        if !is_kotlin_ext(&f.ext) || f.package.is_empty() {
-            continue;
-        }
-        let paths = seen_paths.entry(f.package.as_str()).or_default();
-        if paths.insert(f.path.as_str()) {
-            *counts.entry(f.package.as_str()).or_insert(0) += 1;
-        }
-    }
-    counts
-        .into_iter()
-        .filter_map(|(k, v)| if v >= 2 { Some(k.to_string()) } else { None })
-        .collect()
 }
 
 /// True if this file's import list shows signs of being a Koin/Hilt/Dagger

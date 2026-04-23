@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
-use crate::lang::jvm::{self, compact_label_path};
+use crate::lang::jvm::compact_label_path;
 use crate::model::{FileIndex, Symbol};
 
 #[derive(Default, Clone)]
@@ -265,13 +265,21 @@ fn build_legend(
 
 /// Files considered orphan by tingle's syntactic pass: visible (has lang
 /// or tags), has defs, zero inbound import edges, not an entry point, not
-/// a test, and — for Kotlin — not in a package with ≥2 members (package
-/// peers may call without an import, so we can't prove orphan). Shared by
-/// the legend check, the Orphans section, and the F-record inline tag.
+/// a test. Shared by the legend check, the Orphans section, and the
+/// F-record inline tag.
+///
+/// Historical note: PR #9 added a `kotlin_peers` exemption (skip Kotlin
+/// files in packages with ≥2 members) because we couldn't yet capture
+/// same-package references. That's no longer true — the tree-sitter
+/// captures for `call_expression`, `navigation_expression`, and
+/// `user_type` populate `refs`, and `resolve::all` turns those into real
+/// graph edges. If a Kotlin file survives all of that with in_deg=0, it
+/// genuinely is unreferenced by syntactic analysis. The "may be
+/// runtime-registered" caveat in the legend remains the appropriate
+/// escape hatch for reflection / DI / Manifest-wired edge cases.
 fn orphan_files<'a>(files: &'a [FileIndex], entries: &[&FileIndex]) -> Vec<&'a FileIndex> {
     let entry_paths: std::collections::HashSet<&str> =
         entries.iter().map(|e| e.path.as_str()).collect();
-    let kotlin_peers = jvm::kotlin_packages_with_peers(files);
     files
         .iter()
         .filter(|f| {
@@ -280,7 +288,6 @@ fn orphan_files<'a>(files: &'a [FileIndex], entries: &[&FileIndex]) -> Vec<&'a F
                 && !f.defs.is_empty()
                 && !entry_paths.contains(f.path.as_str())
                 && !f.tags.iter().any(|t| t == "test")
-                && !kotlin_peers.contains(&f.package)
         })
         .collect()
 }
@@ -992,11 +999,12 @@ mod tests {
     }
 
     #[test]
-    fn kotlin_package_peers_suppress_orphan_tag() {
-        // Two Kotlin files share `com.ex.feature`. Neither imports the other,
-        // so both have in_deg == 0 even though they may call each other via
-        // same-package resolution (which tingle can't always see). Conservative
-        // policy: don't tag either as orphan.
+    fn kotlin_files_with_zero_indeg_are_orphan_even_with_peers() {
+        // If `resolve::all` captured same-package refs and the file STILL
+        // has in_deg == 0, no peer references it. The earlier "peer
+        // exemption" was a crutch from when we didn't capture refs — it
+        // silenced genuinely-dead files like `FeedMockData.kt`, which
+        // reviewers correctly identified as orphans.
         let a = FileIndex {
             path: "app/src/main/java/com/ex/feature/ScreenA.kt".into(),
             ext: ".kt".into(),
@@ -1015,19 +1023,9 @@ mod tests {
             defs: vec![make_def("ScreenB", 1, SymbolKind::Class)],
             ..Default::default()
         };
-        // A lonely file in its own package is still orphan-eligible.
-        let lonely = FileIndex {
-            path: "app/src/main/java/com/ex/lonely/Solo.kt".into(),
-            ext: ".kt".into(),
-            lang: "kt".into(),
-            package: "com.ex.lonely".into(),
-            in_deg: 0,
-            defs: vec![make_def("Solo", 1, SymbolKind::Class)],
-            ..Default::default()
-        };
         let opts = opts_minimal();
         let out = render(
-            &[a, b, lonely],
+            &[a, b],
             &[],
             &[],
             &HashMap::new(),
@@ -1035,9 +1033,46 @@ mod tests {
             &[],
             &opts,
         );
-        assert!(!out.contains("ScreenA.kt [orphan]"), "{}", out);
-        assert!(!out.contains("ScreenB.kt [orphan]"), "{}", out);
-        assert!(out.contains("Solo.kt [orphan]"), "{}", out);
+        // Both files have package peers, but neither has a ref edge from
+        // the peer — so both are orphan-tagged.
+        assert!(out.contains("O app/src/main/java/com/ex/feature/ScreenA.kt"));
+        assert!(out.contains("O app/src/main/java/com/ex/feature/ScreenB.kt"));
+    }
+
+    #[test]
+    fn kotlin_file_referenced_by_peer_not_orphan() {
+        // ScreenA references ScreenB via the same-package resolver —
+        // ScreenB's in_deg == 1, so only ScreenA shows as orphan.
+        let a = FileIndex {
+            path: "app/src/main/java/com/ex/feature/ScreenA.kt".into(),
+            ext: ".kt".into(),
+            lang: "kt".into(),
+            package: "com.ex.feature".into(),
+            in_deg: 0,
+            defs: vec![make_def("ScreenA", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        let b = FileIndex {
+            path: "app/src/main/java/com/ex/feature/ScreenB.kt".into(),
+            ext: ".kt".into(),
+            lang: "kt".into(),
+            package: "com.ex.feature".into(),
+            in_deg: 1,
+            defs: vec![make_def("ScreenB", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        let opts = opts_minimal();
+        let out = render(
+            &[a, b],
+            &[],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &opts,
+        );
+        assert!(out.contains("O app/src/main/java/com/ex/feature/ScreenA.kt"));
+        assert!(!out.contains("O app/src/main/java/com/ex/feature/ScreenB.kt"));
     }
 
     #[test]
