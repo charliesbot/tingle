@@ -34,16 +34,21 @@ better signal but adds non-determinism.
 
 ## First baseline (one repo, 166 Kotlin files)
 
+Historical numbers from when three output shapes existed:
+
 | variant | tokens | pass/n | mean_score |
 |---|---|---|---|
-| default | 20,927 | 10/10 | 1.00 |
-| --compact | 9,208 | 10/10 | 0.97 |
-| --skeleton | 4,567 | 8/10 | 0.90 |
+| default (full) | 20,927 | 10/10 | 1.00 |
+| compact (now default) | 9,208 | 10/10 | 0.97 |
+| skeleton (removed) | 4,567 | 8/10 | 0.90 |
 
-`--compact` saves 56% tokens for 3% quality loss — strong tradeoff.
-`--skeleton` saves 78% tokens for 10% loss, and the specific failures
-(`test_layout`, `settings_storage`) tell us exactly what's lost: the
-F section's per-file detail + imports.
+The compact layout — now the only default — saved 56% tokens for 3%
+quality loss, which is what justified making it the baseline. The
+skeleton variant saved 78% for 10% loss, but the failing questions
+(`test_layout`, `settings_storage`) showed exactly what was being
+dropped: the F section's per-file detail. Rather than ship a flag with
+known quality holes, we collapsed to a single shape and removed
+skeleton entirely — use `--scope PATH` to zoom in instead.
 
 ## Adding questions for a new repo
 
