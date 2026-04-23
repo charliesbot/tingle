@@ -115,10 +115,36 @@ pub fn entry_points<'a>(files: &'a [FileIndex], opts: EntryPointsOpts) -> Vec<&'
     scored.into_iter().take(n).map(|(_, f)| f).collect()
 }
 
-/// Every file with in-degree ≥ 2, sorted descending (stable).
-pub fn utilities(files: &[FileIndex]) -> Vec<&FileIndex> {
-    let mut out: Vec<&FileIndex> = files.iter().filter(|f| f.in_deg >= 2).collect();
-    // Stable sort by in_deg desc.
+/// Files with ≥2 inbound edges from *non-registration* callers, sorted by
+/// total in_deg descending (stable).
+///
+/// DI/registration files (Koin/Hilt modules) are routing, not logical
+/// dependency: one Koin module binding 11 classes inflates each binding's
+/// in_deg by 1 and drags 11 DTOs into the Utilities section. We keep the
+/// raw `in_deg` for display honesty but filter by non-registration callers
+/// so the section reflects code that's actually reused.
+pub fn utilities<'a>(
+    files: &'a [FileIndex],
+    callers: &HashMap<String, Vec<String>>,
+) -> Vec<&'a FileIndex> {
+    let by_path: HashMap<&str, &FileIndex> = files.iter().map(|f| (f.path.as_str(), f)).collect();
+    let mut out: Vec<&FileIndex> = files
+        .iter()
+        .filter(|f| {
+            let Some(cs) = callers.get(f.path.as_str()) else {
+                return false;
+            };
+            let non_reg = cs
+                .iter()
+                .filter(|c| {
+                    by_path
+                        .get(c.as_str())
+                        .map_or(true, |cf| !cf.is_registration)
+                })
+                .count();
+            non_reg >= 2
+        })
+        .collect();
     out.sort_by_key(|f| std::cmp::Reverse(f.in_deg));
     out
 }
@@ -258,10 +284,62 @@ mod tests {
         let mut c = fi("src/c.ts", "ts");
         c.in_deg = 2;
         let files = vec![a, b, c];
-        let u = utilities(&files);
+        let mut callers: HashMap<String, Vec<String>> = HashMap::new();
+        callers.insert(
+            "src/a.ts".into(),
+            vec![
+                "x1.ts".into(),
+                "x2.ts".into(),
+                "x3.ts".into(),
+                "x4.ts".into(),
+                "x5.ts".into(),
+            ],
+        );
+        callers.insert("src/b.ts".into(), vec!["x1.ts".into()]);
+        callers.insert("src/c.ts".into(), vec!["x1.ts".into(), "x2.ts".into()]);
+        let u = utilities(&files, &callers);
         assert_eq!(u.len(), 2);
         assert_eq!(u[0].path, "src/a.ts");
         assert_eq!(u[1].path, "src/c.ts");
+    }
+
+    #[test]
+    fn utility_excludes_files_with_only_registration_callers() {
+        // Classic Android/Kotlin pattern: Koin `AppModule.kt` binds 11 services;
+        // each binding gets +1 in_deg from the module. Without discount, all 11
+        // appear as utilities. With discount, only those with real callers stay.
+        let mut di = fi("app/di/AppModule.kt", "kt");
+        di.is_registration = true;
+        let mut tag = fi("app/services/TagHandler.kt", "kt");
+        tag.in_deg = 1; // only the DI module uses it
+        let mut real = fi("app/services/RealService.kt", "kt");
+        real.in_deg = 3; // DI module + 2 actual callers
+        let files = vec![di, tag, real];
+        let mut callers: HashMap<String, Vec<String>> = HashMap::new();
+        callers.insert(
+            "app/services/TagHandler.kt".into(),
+            vec!["app/di/AppModule.kt".into()],
+        );
+        callers.insert(
+            "app/services/RealService.kt".into(),
+            vec![
+                "app/di/AppModule.kt".into(),
+                "app/ui/Screen.kt".into(),
+                "app/worker/Job.kt".into(),
+            ],
+        );
+        let u = utilities(&files, &callers);
+        let paths: Vec<&str> = u.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            !paths.contains(&"app/services/TagHandler.kt"),
+            "{:?}",
+            paths
+        );
+        assert!(
+            paths.contains(&"app/services/RealService.kt"),
+            "{:?}",
+            paths
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
-use crate::lang::jvm::compact_label_path;
+use crate::lang::jvm::{self, compact_label_path};
 use crate::model::{FileIndex, Symbol};
 
 #[derive(Default, Clone)]
@@ -25,8 +25,6 @@ pub struct Options {
     /// prefix. Top sections still render whole-repo context. Empty = no
     /// filter.
     pub scope: String,
-    /// `--skeleton`: omit the `## Files` section entirely.
-    pub skeleton: bool,
     /// `--full`: include per-file def listings in the `## Files` section
     /// AND show up to 3 callers per Utility record.
     ///
@@ -37,8 +35,8 @@ pub struct Options {
     pub full: bool,
     /// Suppress the soft token warning. When the caller is writing to a
     /// file (the default), there's no preview to overflow, so the
-    /// "consider --skeleton / --scope / pipe to file" advice is moot
-    /// and just burns tokens. Stdout mode keeps the warning.
+    /// "consider --scope / pipe to file" advice is moot and just burns
+    /// tokens. Stdout mode keeps the warning.
     pub suppress_warning: bool,
 }
 
@@ -48,9 +46,9 @@ pub struct Options {
 /// 8k chosen because that's roughly where agent CLI tool-result previews
 /// start to truncate (~30-40KB of inline output). The warning's
 /// actionable hint — pipe to a file the agent can Read, or shrink with
-/// --skeleton/--scope — is what agents need at THIS size, not at 20k
-/// where the output is already unrecoverable in many environments.
-/// Small repos (<8k tokens fit comfortably anywhere) don't see it.
+/// --scope — is what agents need at THIS size, not at 20k where the
+/// output is already unrecoverable in many environments. Small repos
+/// (<8k tokens fit comfortably anywhere) don't see it.
 const TOKEN_WARN_THRESHOLD: usize = 8_000;
 
 pub fn render(
@@ -134,14 +132,11 @@ fn write_header(
         // filesystem namespaces, and /tmp inside the container isn't
         // reachable by the outside agent. The agent picks a path it
         // can read back.
-        // Order intentional: lead with lossless workarounds (file
-        // redirect keeps everything; --scope keeps everything for a
-        // subtree). `--skeleton` is a real fallback but it drops the F
-        // section — the per-file detail that's tingle's whole job — so
-        // it's a worse default suggestion than the lossless options.
+        // Both workarounds are lossless — file redirect keeps everything,
+        // --scope keeps everything for a subtree.
         writeln!(
             out,
-            "# warning: ~{}k tokens — exceeds many agent previews. Pipe to a file your agent can Read (e.g. `tingle ... > out.md`) or zoom in with --scope PATH (both lossless). --skeleton drops F section if you only need the architecture layer.",
+            "# warning: ~{}k tokens — exceeds many agent previews. Pipe to a file your agent can Read (e.g. `tingle ... > out.md`) or zoom in with --scope PATH.",
             approx_tokens / 1000
         )
         .unwrap();
@@ -179,14 +174,23 @@ fn build_legend(
         sections.push("U=utility(in=fan-in)");
     }
     if !dir_edges.is_empty() {
-        sections.push("M=module-edge");
+        // `src -> dst` reads as "src imports from dst" — the arrow points
+        // from dependent to dependency. Legend calls this out explicitly
+        // so agents don't infer the opposite convention.
+        sections.push("M=module-edge(src->dst=src-imports-dst)");
     }
-    let files_rendered = !opts.skeleton
-        && files
-            .iter()
-            .any(|f| !f.lang.is_empty() || !f.tags.is_empty());
+    let files_rendered = files
+        .iter()
+        .any(|f| !f.lang.is_empty() || !f.tags.is_empty());
     if files_rendered {
-        sections.push("F=file");
+        // `(N)` after the path is LOC for files tingle parses — surfaces
+        // outsized files (common refactor targets) at a glance.
+        let any_loc = files.iter().any(|f| f.loc > 0);
+        if any_loc {
+            sections.push("F=file(N=loc)");
+        } else {
+            sections.push("F=file");
+        }
     }
     if !sections.is_empty() {
         parts.push(sections.join(" "));
@@ -237,6 +241,7 @@ fn build_legend(
         let scope = opts.scope.trim_start_matches("./").trim_end_matches('/');
         let entry_paths: std::collections::HashSet<&str> =
             entries.iter().map(|e| e.path.as_str()).collect();
+        let kotlin_peers = jvm::kotlin_packages_with_peers(files);
         let any_orphan = files.iter().any(|f| {
             (!f.lang.is_empty() || !f.tags.is_empty())
                 && (scope.is_empty()
@@ -246,6 +251,7 @@ fn build_legend(
                 && !f.defs.is_empty()
                 && !entry_paths.contains(f.path.as_str())
                 && !f.tags.iter().any(|t| t == "test")
+                && !kotlin_peers.contains(&f.package)
         });
         if any_orphan {
             // Honest framing — tingle reads static imports only, so files
@@ -335,10 +341,15 @@ fn build_body(
             } else {
                 ""
             };
+            let loc_str = if f.loc > 0 {
+                format!(" loc={}", f.loc)
+            } else {
+                String::new()
+            };
             writeln!(
                 b,
-                "EP {}:{} {} (out={} in={}){}",
-                f.path, line, name, f.out_deg, f.in_deg, hub
+                "EP {}:{} {} (out={} in={}{}){}",
+                f.path, line, name, f.out_deg, f.in_deg, loc_str, hub
             )
             .unwrap();
         }
@@ -372,7 +383,12 @@ fn build_body(
                 }
                 s
             };
-            writeln!(b, "U {} (in={}){}", f.path, f.in_deg, caller_str).unwrap();
+            let loc_str = if f.loc > 0 {
+                format!(" loc={}", f.loc)
+            } else {
+                String::new()
+            };
+            writeln!(b, "U {} (in={}{}){}", f.path, f.in_deg, loc_str, caller_str).unwrap();
         }
         b.push('\n');
     }
@@ -414,9 +430,6 @@ fn build_body(
     }
 
     // Files
-    if opts.skeleton {
-        return b;
-    }
     let scope = opts.scope.trim_start_matches("./").trim_end_matches('/');
     let mut visible: Vec<&FileIndex> = files
         .iter()
@@ -435,8 +448,16 @@ fn build_body(
     // Orphan = file with defs that nothing imports AND isn't an entry point
     // AND isn't a test. Usually dead code worth deleting; cheap to surface,
     // high signal for cleanup workflows.
+    //
+    // Kotlin exception: files in a package with ≥2 members are suppressed.
+    // Same-package peers can call a declaration without an `import`, and
+    // tingle's syntactic capture misses several routing paths (extension
+    // fns, reflection, manifest/DI wiring). Flagging these as orphans was
+    // the single biggest false-positive source on Android/Kotlin repos —
+    // better to stay silent than make a wrong claim.
     let entry_paths: std::collections::HashSet<&str> =
         entries.iter().map(|e| e.path.as_str()).collect();
+    let kotlin_peers = jvm::kotlin_packages_with_peers(files);
     let orphan_paths: std::collections::HashSet<&str> = visible
         .iter()
         .filter(|f| {
@@ -444,6 +465,7 @@ fn build_body(
                 && !f.defs.is_empty()
                 && !entry_paths.contains(f.path.as_str())
                 && !f.tags.iter().any(|t| t == "test")
+                && !kotlin_peers.contains(&f.package)
         })
         .map(|f| f.path.as_str())
         .collect();
@@ -496,6 +518,14 @@ fn write_file_line(
     if orphan_paths.contains(f.path.as_str()) {
         tag_str.push_str("[orphan]");
     }
+    // LOC marker — surfaces outsized files at a glance (reviewer asked for
+    // this explicitly: FeedRepositoryImpl at 378, FeedViewModel at 336).
+    // Omitted when we didn't read the file (unsupported extension, loc=0).
+    let loc_str = if f.loc > 0 {
+        format!(" ({})", f.loc)
+    } else {
+        String::new()
+    };
     // Cap the imports list with overflow notation. Mirrors the U-record
     // caller pattern (`(+N more)`). DI-heavy / aggregate files like
     // `AppModule.kt` carry 20+ imports inline — capping at 10 keeps the
@@ -513,7 +543,7 @@ fn write_file_line(
             f.imports.len() - IMPORTS_CAP
         )
     };
-    writeln!(b, "F {} {}{}", display_name, tag_str, imps).unwrap();
+    writeln!(b, "F {}{} {}{}", display_name, loc_str, tag_str, imps).unwrap();
     if opts.full {
         write_defs(b, &f.defs);
     }
@@ -668,24 +698,6 @@ mod tests {
         let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
         assert!(out.contains("F README.md [untracked]"), "{}", out);
         assert!(!out.contains("###"), "{}", out);
-    }
-
-    #[test]
-    fn skeleton_omits_files_section() {
-        let f = FileIndex {
-            path: "a.ts".into(),
-            lang: "ts".into(),
-            ..Default::default()
-        };
-        let opts = Options {
-            version: "v0".into(),
-            gen_date: "2026-04-19".into(),
-            no_legend: true,
-            skeleton: true,
-            ..Default::default()
-        };
-        let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
-        assert!(!out.contains("## Files"));
     }
 
     #[test]
@@ -966,6 +978,95 @@ mod tests {
         assert!(!out.contains("F dead.test.ts [orphan]"), "{}", out);
         // Files without defs aren't orphans (we have no code-presence to call dead).
         assert!(!out.contains("F empty.ts [orphan]"), "{}", out);
+    }
+
+    #[test]
+    fn loc_renders_after_path_when_present() {
+        let f = FileIndex {
+            path: "src/big.ts".into(),
+            lang: "ts".into(),
+            loc: 378,
+            defs: vec![make_def("foo", 1, SymbolKind::Func)],
+            ..Default::default()
+        };
+        let opts = Options {
+            no_legend: false,
+            ..opts_minimal()
+        };
+        let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
+        assert!(out.contains("F src/big.ts (378)"), "{}", out);
+        // Legend advertises `(N=loc)` so agents know the parens are a count.
+        assert!(out.contains("F=file(N=loc)"), "{}", out);
+    }
+
+    #[test]
+    fn loc_omitted_when_zero() {
+        // Files we didn't read (unsupported ext) keep loc=0 — don't emit
+        // `(0)` because it's misleading.
+        let f = FileIndex {
+            path: "src/a.ts".into(),
+            lang: "ts".into(),
+            defs: vec![make_def("foo", 1, SymbolKind::Func)],
+            ..Default::default()
+        };
+        let opts = Options {
+            no_legend: false,
+            ..opts_minimal()
+        };
+        let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
+        assert!(!out.contains("(0)"), "{}", out);
+        // Legend falls back to plain `F=file` when no file has a LOC.
+        assert!(!out.contains("F=file(N=loc)"), "{}", out);
+        assert!(out.contains("F=file"), "{}", out);
+    }
+
+    #[test]
+    fn kotlin_package_peers_suppress_orphan_tag() {
+        // Two Kotlin files share `com.ex.feature`. Neither imports the other,
+        // so both have in_deg == 0 even though they may call each other via
+        // same-package resolution (which tingle can't always see). Conservative
+        // policy: don't tag either as orphan.
+        let a = FileIndex {
+            path: "app/src/main/java/com/ex/feature/ScreenA.kt".into(),
+            ext: ".kt".into(),
+            lang: "kt".into(),
+            package: "com.ex.feature".into(),
+            in_deg: 0,
+            defs: vec![make_def("ScreenA", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        let b = FileIndex {
+            path: "app/src/main/java/com/ex/feature/ScreenB.kt".into(),
+            ext: ".kt".into(),
+            lang: "kt".into(),
+            package: "com.ex.feature".into(),
+            in_deg: 0,
+            defs: vec![make_def("ScreenB", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        // A lonely file in its own package is still orphan-eligible.
+        let lonely = FileIndex {
+            path: "app/src/main/java/com/ex/lonely/Solo.kt".into(),
+            ext: ".kt".into(),
+            lang: "kt".into(),
+            package: "com.ex.lonely".into(),
+            in_deg: 0,
+            defs: vec![make_def("Solo", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        let opts = opts_minimal();
+        let out = render(
+            &[a, b, lonely],
+            &[],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &opts,
+        );
+        assert!(!out.contains("ScreenA.kt [orphan]"), "{}", out);
+        assert!(!out.contains("ScreenB.kt [orphan]"), "{}", out);
+        assert!(out.contains("Solo.kt [orphan]"), "{}", out);
     }
 
     #[test]

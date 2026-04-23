@@ -34,6 +34,17 @@ pub fn all(files: &mut [FileIndex], aliases: &Aliases) {
         // Single gate for the JVM-ecosystem code paths. See `lang::jvm`
         // for everything that switches on this.
         let is_kotlin = jvm::is_kotlin_ext(&f.ext);
+        // AndroidManifest.xml carries class FQCNs in its `imports` list
+        // (populated by `parse`). Route them through the same FQCN
+        // resolver Kotlin uses — this is how Activities/Services/
+        // Receivers/Application get counted as live without a code import.
+        let is_manifest = jvm::is_android_manifest_path(&f.path);
+        // DI-registration flag must be read from the *original* imports —
+        // the FQCN-rewrite loop below strips the `org.koin.` / `dagger.`
+        // prefixes the heuristic relies on.
+        if is_kotlin {
+            f.is_registration = jvm::is_registration_imports(&f.imports);
+        }
         let mut resolved: Vec<String> = Vec::new();
 
         for imp in f.imports.iter_mut() {
@@ -51,7 +62,9 @@ pub fn all(files: &mut [FileIndex], aliases: &Aliases) {
             // Kotlin FQCN? Resolve for the graph, then render a compact
             // `<module>/<ClassName>` tag for display — the full repo path
             // is much longer than both the FQCN and the display form.
-            if is_kotlin {
+            // Manifest files share this path: their `imports` are class
+            // FQCNs extracted from `android:name=` attributes.
+            if is_kotlin || is_manifest {
                 if let Some(r) = jvm::resolve_kotlin_fqcn(imp, &kotlin_index) {
                     let display = jvm::kotlin_compact_display(&r);
                     resolved.push(r);
@@ -64,6 +77,22 @@ pub fn all(files: &mut [FileIndex], aliases: &Aliases) {
             if is_kotlin {
                 if let Some(collapsed) = jvm::collapse_dotted(imp) {
                     *imp = collapsed;
+                }
+            }
+        }
+
+        // Kotlin same-package references: the import list doesn't capture
+        // calls to top-level decls in the file's own package (Kotlin resolves
+        // them without an import). Backfill those edges from the symbol refs
+        // we extracted from the file body — this is the structural fix for
+        // the "every screen in a feature looks orphan" failure mode on
+        // Android/Kotlin repos.
+        if is_kotlin {
+            for r in &f.refs {
+                if let Some(path) = jvm::resolve_same_package_ref(r, &f.package, &kotlin_index) {
+                    if path != from {
+                        resolved.push(path);
+                    }
                 }
             }
         }
@@ -309,6 +338,123 @@ mod tests {
         files[0].imports = vec!["django.db.models".into(), "os.path".into()];
         all(&mut files, &HashMap::new());
         assert_eq!(files[0].imports, vec!["django.db.models", "os.path"]);
+    }
+
+    #[test]
+    fn kotlin_same_package_ref_creates_edge_without_import() {
+        // Two files share `com.ex.app`. `Caller.kt` calls `helper()` which is
+        // declared in `Helper.kt` — no import, because Kotlin same-package
+        // resolution happens implicitly. The ref-based resolver backfills
+        // the missing graph edge.
+        let mut files = vec![
+            {
+                let mut f = kt(
+                    "app/src/main/java/com/ex/app/Caller.kt",
+                    "com.ex.app",
+                    &["Caller"],
+                );
+                f.refs = vec!["helper".into()];
+                f
+            },
+            kt(
+                "app/src/main/java/com/ex/app/Helper.kt",
+                "com.ex.app",
+                &["helper"],
+            ),
+        ];
+        all(&mut files, &HashMap::new());
+        assert_eq!(
+            files[0].resolved_imports,
+            vec!["app/src/main/java/com/ex/app/Helper.kt"]
+        );
+        // Display imports stay empty — no import statement existed, and
+        // synthesizing one would be dishonest.
+        assert!(files[0].imports.is_empty());
+    }
+
+    #[test]
+    fn kotlin_ref_ignores_self_reference() {
+        // A file referencing its own declarations (recursive calls, internal
+        // type usage) must not generate a self-edge.
+        let mut files = vec![{
+            let mut f = kt(
+                "app/src/main/java/com/ex/Foo.kt",
+                "com.ex",
+                &["Foo", "helper"],
+            );
+            f.refs = vec!["helper".into(), "Foo".into()];
+            f
+        }];
+        all(&mut files, &HashMap::new());
+        assert!(files[0].resolved_imports.is_empty());
+    }
+
+    #[test]
+    fn kotlin_ref_ignores_cross_package_match() {
+        // `helper` exists in another package — a file that references
+        // `helper` in ITS package should not accidentally match.
+        let mut files = vec![
+            {
+                let mut f = kt("app/src/main/java/com/a/Caller.kt", "com.a", &["Caller"]);
+                f.refs = vec!["helper".into()];
+                f
+            },
+            kt("app/src/main/java/com/b/Helper.kt", "com.b", &["helper"]),
+        ];
+        all(&mut files, &HashMap::new());
+        assert!(files[0].resolved_imports.is_empty());
+    }
+
+    #[test]
+    fn kotlin_registration_flag_set_when_koin_imported() {
+        let mut files = vec![{
+            let mut f = kt(
+                "app/src/main/java/com/ex/di/AppModule.kt",
+                "com.ex.di",
+                &["AppModule"],
+            );
+            f.imports = vec!["org.koin.dsl.module".into()];
+            f
+        }];
+        all(&mut files, &HashMap::new());
+        assert!(files[0].is_registration);
+    }
+
+    #[test]
+    fn kotlin_registration_flag_unset_for_plain_kotlin() {
+        let mut files = vec![{
+            let mut f = kt("app/src/main/java/com/ex/Foo.kt", "com.ex", &["Foo"]);
+            f.imports = vec!["kotlinx.coroutines.flow.Flow".into()];
+            f
+        }];
+        all(&mut files, &HashMap::new());
+        assert!(!files[0].is_registration);
+    }
+
+    #[test]
+    fn android_manifest_resolves_class_refs_to_kotlin_files() {
+        // AresApplication-style case: the app class is referenced only from
+        // AndroidManifest.xml. Without manifest wiring, it would look orphan.
+        // With the resolver change, the manifest contributes a real edge.
+        let manifest = FileIndex {
+            path: "app/src/main/AndroidManifest.xml".into(),
+            lang: "androidManifest".into(),
+            imports: vec!["com.ex.app.AresApplication".into()],
+            ..Default::default()
+        };
+        let app_class = kt(
+            "app/src/main/java/com/ex/app/AresApplication.kt",
+            "com.ex.app",
+            &["AresApplication"],
+        );
+        let mut files = vec![manifest, app_class];
+        all(&mut files, &HashMap::new());
+        assert_eq!(
+            files[0].resolved_imports,
+            vec!["app/src/main/java/com/ex/app/AresApplication.kt"]
+        );
+        // Display collapses to the compact `<module>/<ClassName>` form.
+        assert_eq!(files[0].imports, vec!["app/AresApplication"]);
     }
 
     #[test]

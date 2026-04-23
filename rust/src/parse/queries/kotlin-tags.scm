@@ -36,3 +36,21 @@
 
 (import
   (qualified_identifier) @name.reference.import) @reference.import
+
+; ---- tingle additions: same-package symbol references ----
+; Unqualified call targets — `foo()` where `foo` is a top-level decl.
+; Qualified calls like `Foo.bar()` have a `navigation_expression` as the
+; first child, not an identifier, so this rule won't match them.
+(call_expression
+  (identifier) @name.reference.symbol)
+
+; Leftmost identifier of any navigation chain — `Foo.bar` → `Foo`,
+; `Foo.bar.baz` → `Foo` (innermost nav_expr matches, outer ones don't
+; since their first child is another navigation_expression). The anchor
+; `.` forces first-named-child position.
+(navigation_expression
+  . (identifier) @name.reference.symbol)
+
+; Type references — `val x: Foo`, parameter types, return types.
+(user_type
+  (identifier) @name.reference.symbol)

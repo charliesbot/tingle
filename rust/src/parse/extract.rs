@@ -20,6 +20,9 @@ pub struct Extracted {
     pub imports: Vec<String>,
     /// Dot-separated package name (Kotlin `package` header, etc.).
     pub package: String,
+    /// Unqualified identifiers referenced in the body (Kotlin only for now).
+    /// Deduped on insertion.
+    pub refs: Vec<String>,
 }
 
 pub fn extract_one<'a>(query: &Query, root: Node<'a>, src: &[u8]) -> Extracted {
@@ -33,6 +36,8 @@ pub fn extract_one<'a>(query: &Query, root: Node<'a>, src: &[u8]) -> Extracted {
     let mut imports: Vec<String> = Vec::new();
     let mut seen_import: HashSet<String> = HashSet::new();
     let mut package = String::new();
+    let mut refs: Vec<String> = Vec::new();
+    let mut seen_ref: HashSet<String> = HashSet::new();
 
     while let Some(m) = matches.next() {
         let mut def = RawDef {
@@ -48,6 +53,14 @@ pub fn extract_one<'a>(query: &Query, root: Node<'a>, src: &[u8]) -> Extracted {
                     if !trimmed.is_empty() && !seen_import.contains(trimmed) {
                         seen_import.insert(trimmed.to_string());
                         imports.push(trimmed.to_string());
+                    }
+                }
+            } else if name == "name.reference.symbol" {
+                if let Ok(text) = cap.node.utf8_text(src) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() && !seen_ref.contains(trimmed) {
+                        seen_ref.insert(trimmed.to_string());
+                        refs.push(trimmed.to_string());
                     }
                 }
             } else if name == "name.reference.package" {
@@ -136,6 +149,7 @@ pub fn extract_one<'a>(query: &Query, root: Node<'a>, src: &[u8]) -> Extracted {
         defs: all,
         imports,
         package,
+        refs,
     }
 }
 

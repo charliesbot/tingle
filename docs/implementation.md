@@ -211,7 +211,7 @@ M <src-label> -> <dst-label>+            # All labels via compact_label_path,
                                          # to the same label merge into one M
                                          # line; self-edges dropped).
 
-## Files          (omitted entirely with --skeleton)
+## Files
 ### <parent-dir-anchor>                  # Group header for dirs with ≥2 files;
                                          # singleton dirs skip the header (the
                                          # `###` would cost more than it saves)
@@ -245,7 +245,7 @@ Prevents the "legend over-promises" UX bug where agents see `S=manifest` in the 
 When `(body + header) / 4 > 20_000`, prepend a line:
 
 ```
-# warning: ~Nk tokens — consider --compact, --skeleton, or --scope PATH
+# warning: ~Nk tokens — pipe to a file or zoom in with --scope PATH
 ```
 
 No automatic pruning. Agent decides. Threshold is char/4 — a rough cl100k_base approximation. 20k matches the typical "fits in one tool result with room for reply" budget across most agent environments.
@@ -260,7 +260,6 @@ tingle --stdout [REPO]                  # print map to stdout (for pipelines)
 tingle --out PATH [REPO]                # write to PATH instead of .tinglemap.md
 tingle --full [REPO]                    # add per-file def signatures + 3 callers/U
 tingle --scope PATH [REPO]              # filter F section to subtree
-tingle --skeleton [REPO]                # drop F section entirely
 tingle --alias PREFIX:PATH [REPO]       # repeatable; alias-substitute imports
 tingle --no-legend [REPO]               # skip the legend line
 tingle --version

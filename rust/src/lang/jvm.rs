@@ -11,9 +11,16 @@
 //!   - `is_kotlin_ext`         — gate Kotlin-only code paths in `resolve`
 //!   - `KotlinIndex` + `build_kotlin_index` / `resolve_kotlin_fqcn` /
 //!     `kotlin_compact_display` — FQCN resolution + display compaction
+//!   - `resolve_same_package_ref` / `kotlin_packages_with_peers` —
+//!     same-package usage resolution + orphan-policy helper
+//!   - `is_registration_imports` — Koin/Hilt/Dagger DI detection for the
+//!     utility-scoring discount
 //!   - `collapse_dotted`       — fallback for unresolved Kotlin FQCN imports
 //!   - `compact_label_path`    — Gradle source-root stripping for labels
 //!     (M edges, U caller lists)
+//!   - `is_android_manifest_path` / `extract_android_manifest_refs` —
+//!     surface `android:name=` class refs so Manifest-wired classes
+//!     (Application/Activity/Service/Receiver/Provider) aren't orphan
 //!   - `is_android_test_path`  — Android Gradle test-set directories
 //!
 //! When tingle gains validated coverage of more JVM-ish layouts (multi-module
@@ -21,6 +28,9 @@
 //! checks across the core modules.
 
 use std::collections::HashMap;
+
+use once_cell::sync::Lazy;
+use regex::Regex;
 
 use crate::model::FileIndex;
 
@@ -83,6 +93,73 @@ pub fn build_kotlin_index(files: &[FileIndex]) -> KotlinIndex {
             .or_insert_with(|| f.path.clone());
     }
     idx
+}
+
+/// Resolve an unqualified symbol name against the file's own package.
+/// Same-package references don't require an `import` in Kotlin, so the
+/// import list doesn't capture them — this backfills the missing edges.
+///
+/// Returns the repo-relative file path of the declaring file, or `None`
+/// if the package has no file declaring `name`. Empty `package` never
+/// resolves (top-level / default package files aren't indexed).
+pub fn resolve_same_package_ref(name: &str, package: &str, idx: &KotlinIndex) -> Option<String> {
+    if package.is_empty() {
+        return None;
+    }
+    idx.by_pkg.get(package)?.get(name).cloned()
+}
+
+/// Count distinct files declaring `package`, excluding `self_path`.
+/// Used by the orphan-policy check: a Kotlin file with package peers
+/// can't be proven unused by syntactic analysis (the peers may call it
+/// without an import), so the orphan tag is suppressed.
+pub fn package_peer_count(package: &str, self_path: &str, idx: &KotlinIndex) -> usize {
+    if package.is_empty() {
+        return 0;
+    }
+    let Some(m) = idx.by_pkg.get(package) else {
+        return 0;
+    };
+    let mut paths: std::collections::HashSet<&str> = m.values().map(String::as_str).collect();
+    paths.remove(self_path);
+    paths.len()
+}
+
+/// Kotlin package names that contain ≥2 distinct Kotlin files. Used by the
+/// orphan-policy check: if a file lives in such a package, at least one
+/// sibling exists that could reference it without an import, so we can't
+/// assert orphan on syntactic grounds alone.
+pub fn kotlin_packages_with_peers(files: &[FileIndex]) -> std::collections::HashSet<String> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut seen_paths: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+    for f in files {
+        if !is_kotlin_ext(&f.ext) || f.package.is_empty() {
+            continue;
+        }
+        let paths = seen_paths.entry(f.package.as_str()).or_default();
+        if paths.insert(f.path.as_str()) {
+            *counts.entry(f.package.as_str()).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(k, v)| if v >= 2 { Some(k.to_string()) } else { None })
+        .collect()
+}
+
+/// True if this file's import list shows signs of being a Koin/Hilt/Dagger
+/// DI-registration module. Call BEFORE `resolve::all` mutates `imports` —
+/// Kotlin FQCNs get rewritten to compact display strings that would strip
+/// the `org.koin.` / `dagger.` prefixes this check relies on.
+///
+/// Heuristic, not semantic: we can't tell a DI-wiring file from a file
+/// that just happens to import Koin's `KoinComponent` for injection.
+/// That's fine — the consumer (`rank::utilities`) uses this as a *soft*
+/// signal to discount inbound edges, not to hide the file.
+pub fn is_registration_imports(imports: &[String]) -> bool {
+    imports
+        .iter()
+        .any(|i| i.starts_with("org.koin.") || i.starts_with("dagger."))
 }
 
 /// Resolve a Kotlin FQCN import like `com.foo.bar.Baz` or
@@ -248,6 +325,66 @@ pub fn compact_label_path(p: &str) -> String {
     }
 }
 
+// ---- AndroidManifest.xml class reference extraction ----
+
+/// True for the Android manifest filename we special-case.
+pub fn is_android_manifest_path(path: &str) -> bool {
+    path.ends_with("/AndroidManifest.xml") || path == "AndroidManifest.xml"
+}
+
+/// Extract the `package` attribute from the `<manifest>` element.
+/// Returns "" when absent (modern AGP uses `namespace` in build.gradle
+/// instead; that path isn't handled here yet).
+pub fn extract_manifest_package(xml: &str) -> String {
+    static RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"<manifest[^>]*\bpackage\s*=\s*"([^"]+)""#).unwrap());
+    RE.captures(xml)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default()
+}
+
+/// Extract class FQCNs referenced via `android:name="..."` attributes on
+/// `<activity>`, `<service>`, `<receiver>`, `<provider>`, and
+/// `<application>` elements. Resolves leading-dot shorthand against the
+/// manifest's `package` attribute.
+///
+/// Filters aggressively to class-like values: the last FQCN segment must
+/// start with an uppercase letter and contain at least one lowercase
+/// letter (rejects permission constants like `INTERNET` or
+/// `ACCESS_COARSE_LOCATION`). Framework-namespace references
+/// (`android.*`) are also skipped — they'll never resolve to a repo file.
+pub fn extract_android_manifest_refs(xml: &str) -> Vec<String> {
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"android:name\s*=\s*"([^"]+)""#).unwrap());
+    let pkg = extract_manifest_package(xml);
+    let mut out = Vec::new();
+    for cap in RE.captures_iter(xml) {
+        let raw = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let fqcn = if let Some(rest) = raw.strip_prefix('.') {
+            if pkg.is_empty() {
+                continue;
+            }
+            format!("{}.{}", pkg, rest)
+        } else if raw.contains('.') {
+            if raw.starts_with("android.") {
+                continue;
+            }
+            raw.to_string()
+        } else {
+            continue;
+        };
+        let last = fqcn.rsplit('.').next().unwrap_or("");
+        let is_class_like = last.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && last.chars().any(|c| c.is_ascii_lowercase());
+        if is_class_like {
+            out.push(fqcn);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 // ---- Android test-set directories ----
 
 /// True if `lower_path` lives under one of Android Gradle's test source
@@ -358,6 +495,42 @@ mod tests {
             compact_label_path("core/src/main/java/com/x/shared/core"),
             "core"
         );
+    }
+
+    #[test]
+    fn android_manifest_refs_resolve_leading_dot_against_package() {
+        let xml = r#"<?xml version="1.0"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.ex.app">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <application android:name=".AresApplication">
+        <activity android:name=".MainActivity"/>
+        <service android:name="com.ex.app.sync.SyncService"/>
+        <receiver android:name="com.ex.ext.Handler"/>
+    </application>
+</manifest>"#;
+        let refs = extract_android_manifest_refs(xml);
+        // Leading-dot shorthand gets the manifest's package prefix.
+        assert!(refs.contains(&"com.ex.app.AresApplication".to_string()));
+        assert!(refs.contains(&"com.ex.app.MainActivity".to_string()));
+        // Already-qualified stays intact.
+        assert!(refs.contains(&"com.ex.app.sync.SyncService".to_string()));
+        assert!(refs.contains(&"com.ex.ext.Handler".to_string()));
+        // Permission names (UPPER_CASE last segment) are NOT classes.
+        assert!(!refs.iter().any(|s| s.contains("INTERNET")));
+        // Framework namespace is skipped.
+        assert!(!refs.iter().any(|s| s.starts_with("android.")));
+    }
+
+    #[test]
+    fn android_manifest_refs_skip_when_no_package() {
+        // Modern AGP projects often drop `package=` in favor of
+        // `namespace` in build.gradle. Without the package attr, leading-
+        // dot refs can't be resolved — skip rather than guess.
+        let xml = r#"<manifest>
+    <application android:name=".App"/>
+</manifest>"#;
+        let refs = extract_android_manifest_refs(xml);
+        assert!(refs.is_empty(), "got {:?}", refs);
     }
 
     #[test]
