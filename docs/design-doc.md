@@ -104,14 +104,13 @@ A single Rust binary, no cache, writes a compact tag-prefixed map to `.tinglemap
 2. Parses each file in parallel via `rayon` with tree-sitter (canonical C runtime) → `{defs, imports, package}` per file. Method attachment to enclosing class by byte-range containment.
 3. **Import resolution (heuristic).** Path math for relative imports + extension/index/`__init__.py` trials. Kotlin: `(package, class) → file` index built from parsed files; FQCN imports resolved by longest-prefix match. Display vs graph paths decoupled — the F record's `imp:` shows a compact `<module>/<ClassName>` form, the graph uses the full repo path. `--alias PREFIX:PATH` for manual alias maps. External imports stay raw or, for noisy Kotlin framework deps, collapse to first 2 dot segments.
 4. Builds symbol graph → ranks entry points (heuristic, see §Ranking) and surfaces utilities (in_deg ≥ 2). Files in both EP and U get a `[hub]` annotation.
-5. Renders to stdout. Compact-by-default layout (no per-file def signatures, 1 caller per U); `--full` recovers signatures + 3 callers. M section deduped by compacted form so multi-source-set Gradle modules don't emit duplicate edges.
+5. Renders to `.tinglemap.md`. One output shape: def signatures under every F record, up to 10 callers per utility, import lists capped at 10 with overflow. M section deduped by compacted form so multi-source-set Gradle modules don't emit duplicate edges.
 
 Agent invocation (any subagent, orchestrator, or top-level agent):
 
 ```
 tingle                  # writes ./.tinglemap.md; agent reads it with `Read`
-tingle --stdout         # old behavior; agent captures stdout into context
-tingle --out PATH       # custom output path
+tingle --stdout         # print to stdout (for pipelines)
 ```
 
 Writing to a file dodges Bash-tool preview caps (~30-40KB on most agent CLIs) that truncate inline output on medium+ repos. Three independent agent reviews in a row hit this limit and self-rescued via `tingle > file && Read file`; making it the default shortens the loop by one invocation.
@@ -172,41 +171,30 @@ Utilities get their own section (`## Core utilities`) ranked _by_ in-degree — 
 
 Compact, tag-prefixed, single-line records. Minimal Markdown — just `##` section headers for citability. No backticks, no redundant keywords. Every def-bearing record carries a line-number anchor so the agent can do `Read(path, line=N)` without a search step.
 
-Example output (default — compact layout). The Files section uses `### <dir>` group headers to factor repeated path prefixes; per-file def signatures are emitted with `--full`.
+Example output. The Files section uses `### <dir>` group headers to factor repeated path prefixes; def signatures appear under each F record.
 
 ```
 # tingle 0.1.0  gen=2026-04-19  commit=abc1234  files=166  tokenizer=cl100k_base
-# legend: EP=entry(out=imports-out,in=imports-in) U=utility(in=fan-in) M=module-edge F=file  [M]=modified [test]=test-file  [hub]=both-entry-and-utility
+# legend: EP=entry(out=imports-out,in=imports-in) U=utility(in=fan-in) M=module-edge(src->dst=src-imports-dst) F=file(N=loc)  [M]=modified [test]=test-file  [hub]=both-entry-and-utility  [path:line]=def f=func c=class
 
 ## Entry points
-EP cmd/server/main.go:3 main (out=9 in=0)
-EP wear/.../WearTodayViewModel.kt:27 WearTodayViewModel (out=8 in=2) [hub]
+EP cmd/server/main.go:3 main (out=9 in=0 loc=48)
+EP wear/.../WearTodayViewModel.kt:27 WearTodayViewModel (out=8 in=2 loc=126) [hub]
 
 ## Utilities
-U core/.../FastingDataItem.kt (in=27)  ← app/services/FastingStateListenerService.kt (+26 more)
-U core/.../FastingGoalsConstants.kt (in=26)  ← complications/MainComplicationService.kt (+25 more)
+U core/.../FastingDataItem.kt (in=27 loc=210)  ← app/services/FastingStateListenerService.kt app/services/FastingScheduler.kt ... (+17 more)
 
 ## Modules
 M app -> app/core/components app/navigation core/notifications widget
-M core/abstraction -> core/data/db
-M features/dashboard/app -> core/constants core/domain/repository core/models
 
 ## Files
 ### src/auth
-F login.ts   imp: ../store @okta/sdk
+F login.ts (82)  imp: ../store @okta/sdk
+ 12 c AuthService
+ 18 f login (user, pass)
 ### src
-F main.ts [M]  imp: ./auth/login ./store
-F components/Button.tsx  imp: react
-```
-
-With `--full`, signatures appear under each F record:
-
-```
-F src/main.ts [M]  imp: ./auth/login ./store
+F main.ts (41) [M]  imp: ./auth/login ./store
  12 f bootstrap () -> Promise<void>
- 18 c App
-  25 m start () -> void
-  42 m stop () -> void
 ```
 
 Design notes:
@@ -214,7 +202,7 @@ Design notes:
 - **Anchor vs label paths.** Two distinct path categories with different rules:
   - *Anchors* (EP records, U record paths, F record paths, `### <dir>` headers) stay full and accurate — the agent uses them with `Read(path, line=N)`.
   - *Labels* (M record dirs, U record caller lists) are architecture signals — the agent never `Read`s a directory or a caller. Compressed via `compact_label_path` to strip Gradle source-root boilerplate (`<module>/src/main/<lang>/com/<org>/<proj>/`) → `<module>/<tail>` form.
-- **Compact-by-default.** F records list paths/imports/tags only; U records show 1 caller. The eval harness on three real repos showed this preserves agent task quality (mean ≥ 0.97) at 47-58% of the token cost vs the previous default. `--full` recovers per-file signatures + 3 callers per U record.
+- **One output shape.** Every F record includes def listings; utility callers show up to 10. Earlier versions toggled this via `--skeleton` / `--full` / `--compact`, all removed: agents consume the map as a file (no bash preview cap), so truncation earned nothing and the flag matrix added noise. Earlier eval data justifying the compact form is preserved in `evals/README.md` for context.
 - **Module-grouped F section.** Files grouped by parent directory; each group emits `### <dir>` then F records using basename only. Singleton groups (one file per dir) skip the header — the `###` would cost more tokens than it saves. Agents reconstruct full paths by concatenating the nearest preceding `###` with the basename.
 - **Hub annotation.** Files that qualify as BOTH Entry Points AND Utilities (Manager/Coordinator-style orchestrators with high `out_deg` AND high `in_deg`) get `[hub]` inline on the EP record. Surfaces the dual role without forcing the agent to compare numbers across sections.
 - **Activity tags.** Modified tracked files tagged `[M]`; new-untracked files tagged `[untracked]`; test files (`.test.`, `.spec.`, `__tests__/`, `_test.go`, Android Gradle `/src/test/` and `/src/androidTest/`) tagged `[test]`. Tests are excluded from the Entry Points ranking — they're probes of entries, not entries.
@@ -226,9 +214,7 @@ Design notes:
   - *Verbose framework imports* in Kotlin (`androidx.compose.foundation.background`) — collapse to first 2 dot segments (`androidx.compose`). Kotlin only — Python's `django.db.models` carries signal in the middle segments and stays uncollapsed.
 - **Kotlin FQCN resolution.** `package` headers from `.kt`/`.kts` files build a `(package, class) → file` index. FQCN imports resolve via longest-prefix match for the graph; the F record's import display uses a compact `<module>/<ClassName>` form (the full repo path would be longer than the FQCN itself).
 - **Context-aware legend.** Only mentions section prefixes (`S=`/`EP=`/`U=`/`M=`/`F=`), tag categories (`[M]`/`[untracked]`/`[test]`/`[hub]`), and def-kind markers (`f=func` etc.) that actually appear in THIS run's body. Numeric semantics (`out=imports-out`, `in=fan-in`) are defined inline on the EP/U markers.
-- **Soft token warning.** When output exceeds ~8k tokens (char/4 approximation), the header adds: `# warning: ~Nk tokens — pipe to a file or zoom in with --scope PATH`. No automatic pruning; agent decides which knob to reach for.
-- **`--no-legend`.** Legend is ~50 tokens; agents in re-invocation loops can skip.
-- **`--scope PATH`** filters the F section to a subtree. Top sections (Manifests/EP/U/M) still render whole-repo context.
+- **Soft token warning.** When output exceeds ~8k tokens (char/4 approximation), the header adds: `# warning: ~Nk tokens — pipe to a file or run tingle on a subdirectory`. No automatic pruning; agent decides. The "run on a subdirectory" fallback is intentional — `tingle features/feed` scopes the whole map to that subtree, no separate flag needed.
 - **No bodies.** If the agent needs source, it opens the file at the anchored line. No exception.
 - **Validate empirically.** Compression decisions are gated on `evals/` (rate–distortion measurement on real questions), not intuition.
 
@@ -276,15 +262,13 @@ No `Refs` field — v1 ranking is file-level. Symbol-level fan-in is post-v1 sco
 ### CLI surface
 
 ```
-tingle [REPO]                       # default: cwd. Compact layout by default.
-tingle --full [REPO]                # add per-file def signatures + 3 callers/U
-tingle --scope PATH [REPO]          # filter F section to a subtree
-tingle --alias PREFIX:PATH [REPO]   # repeatable; alias-substitute imports
-tingle --no-legend [REPO]           # skip the legend header line
+tingle [REPO]                       # default: cwd. Writes .tinglemap.md.
+tingle --stdout [REPO]              # print to stdout (for pipelines)
+tingle --alias PREFIX:PATH [REPO]   # repeatable; TS/webpack import alias
 tingle --version
 ```
 
-`--compact` accepted as a hidden no-op for backwards compat — it's now the default. `--max-depth` / `--expand` / `--skeleton` from earlier specs were removed in favor of `--scope` — keeping a single output shape prevents the "which flag now?" UX the reviewer flagged.
+Earlier versions exposed `--full`, `--skeleton`, `--compact`, `--scope`, `--out`, `--no-legend`, `--max-depth`, `--expand`. All removed. Evidence from multi-reviewer agent feedback showed they were either unused in practice or made output shape a decision the user shouldn't have to make. One shape, no toggles. For zooming in, run tingle on a subdirectory (`tingle features/feed`); the whole map scopes naturally.
 
 Deferred indefinitely: `--json`, `--root`, `--remote`, `--force`. No `--force` because there's no cache to force past.
 
@@ -301,8 +285,8 @@ For implementation details (algorithm, data shapes, signature rendering, anchor/
 - **Module graph:** resolved imports aggregated into `dir → dir` edges, emitted as `M` records. Deduped by compacted-form so multi-source-set Gradle modules don't double-emit.
 - **Manifest surface:** `package.json` (scripts, bin, main) + `go.mod` (module path) only. Per-language manifest parsing (Gradle, Cargo, pyproject) explicitly out of scope — see §Non-goals.
 - **Ranking:** equal-weight heuristic — filename conventions + shebangs + manifest-declared entries + (out − in) degree + root-export bonus. Test-tagged files excluded. Files in both EP and U get `[hub]` annotation.
-- **Output:** compact-by-default (paths/imports/tags only, 1 caller per U). `--full` recovers per-file signatures + 3 callers per U. Module-grouped F section with `### <dir>` headers. Context-aware legend. Soft token warning >20k.
-- **State:** none. Stateless. Stdout only.
+- **Output:** single shape — def signatures under every F record, up to 10 callers per U (fan-in ≤ 10 fully enumerated). Module-grouped F section with `### <dir>` headers. Context-aware legend. Soft token warning >8k.
+- **State:** none. Stateless. Writes `.tinglemap.md` by default; `--stdout` for pipelines.
 
 For development:
 

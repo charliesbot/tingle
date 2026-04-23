@@ -199,10 +199,12 @@ EP <full-path>:<line> <name> (out=N in=M) [hub]?
                                           # cleanly as either entry or utility
 
 ## Utilities      (omitted if empty)
-U <full-path> (in=N)  ← <caller-label>+              # 1 caller by default,
-                                                     # 3 with --full;
-                                                     # callers use compact labels
-                                                     # (drop Gradle boilerplate)
+U <full-path> (in=N)  ← <caller-label>+              # Up to 10 callers; fan-in
+                                                     # ≤ 10 fully enumerated so
+                                                     # blast-radius lookups don't
+                                                     # need a grep. Callers use
+                                                     # compact labels (drop Gradle
+                                                     # boilerplate).
 
 ## Modules        (omitted if no edges)
 M <src-label> -> <dst-label>+            # All labels via compact_label_path,
@@ -215,13 +217,12 @@ M <src-label> -> <dst-label>+            # All labels via compact_label_path,
 ### <parent-dir-anchor>                  # Group header for dirs with ≥2 files;
                                          # singleton dirs skip the header (the
                                          # `###` would cost more than it saves)
-F <basename-or-full-path> <tag-string>  imp: <imports> (+N more)?
+F <basename-or-full-path> (loc)? <tag-string>  imp: <imports> (+N more)?
                                          # tags: [M] [untracked] [test] [hub] [orphan]
                                          # imports: display strings, capped at 10
                                          # with `(+N more)` overflow
-                                         # No def listings by default;
-                                         # `--full` enables them
- <line> <kind> <signature>               # Only with --full; one space prefix
+                                         # Def listings always emitted below.
+ <line> <kind> <signature>               # One space prefix
   <line> <kind> <signature>              # Class-attached method; two spaces
 ```
 
@@ -232,10 +233,11 @@ Only mentions categories that actually appear in this run:
 ```
 # legend:
    {S=manifest}? {EP=entry(out=imports-out,in=imports-in)}?
-   {U=utility(in=fan-in)}? {M=module-edge}? {F=file}?
+   {U=utility(in=fan-in)}? {M=module-edge(src->dst=src-imports-dst)}?
+   {F=file(N=loc)|F=file}?
    {[M]=modified}? {[untracked]=new-unstaged}? {[test]=test-file}?
    {[hub]=both-entry-and-utility}?
-   {[path:line]=def f=func c=class m=method i=interface t=type e=enum}?  # only with --full
+   {[path:line]=def f=func c=class m=method i=interface t=type e=enum}?
 ```
 
 Prevents the "legend over-promises" UX bug where agents see `S=manifest` in the legend on a Kotlin Gradle project (no `package.json`/`go.mod` → no S records) and waste effort looking for what isn't there.
@@ -245,7 +247,7 @@ Prevents the "legend over-promises" UX bug where agents see `S=manifest` in the 
 When `(body + header) / 4 > 20_000`, prepend a line:
 
 ```
-# warning: ~Nk tokens — pipe to a file or zoom in with --scope PATH
+# warning: ~Nk tokens — pipe to a file or run tingle on a subdirectory
 ```
 
 No automatic pruning. Agent decides. Threshold is char/4 — a rough cl100k_base approximation. 20k matches the typical "fits in one tool result with room for reply" budget across most agent environments.
@@ -257,11 +259,7 @@ No automatic pruning. Agent decides. Threshold is char/4 — a rough cl100k_base
 ```
 tingle [REPO]                           # writes <REPO>/.tinglemap.md; prints status line
 tingle --stdout [REPO]                  # print map to stdout (for pipelines)
-tingle --out PATH [REPO]                # write to PATH instead of .tinglemap.md
-tingle --full [REPO]                    # add per-file def signatures + 3 callers/U
-tingle --scope PATH [REPO]              # filter F section to subtree
-tingle --alias PREFIX:PATH [REPO]       # repeatable; alias-substitute imports
-tingle --no-legend [REPO]               # skip the legend line
+tingle --alias PREFIX:PATH [REPO]       # repeatable; TS/webpack import alias
 tingle --version
 ```
 

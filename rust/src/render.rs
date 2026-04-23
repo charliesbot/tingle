@@ -17,26 +17,12 @@ pub struct Options {
     pub version: String,
     pub commit: String,
     pub tokenizer_id: String,
-    pub no_legend: bool,
-    pub tokens_approx: u32,
     /// ISO date (UTC) used in the `gen=...` header.
     pub gen_date: String,
-    /// `--scope <PATH>`: filter the `## Files` section to paths under this
-    /// prefix. Top sections still render whole-repo context. Empty = no
-    /// filter.
-    pub scope: String,
-    /// `--full`: include per-file def listings in the `## Files` section
-    /// AND show up to 3 callers per Utility record.
-    ///
-    /// Default is the compact layout: F records list paths/imports/tags
-    /// only and U records show 1 caller. Eval (`evals/run.sh` × 3 real
-    /// repos) showed the compact layout preserves agent task quality
-    /// (≥0.97 mean score) while saving 47-58% of tokens vs `--full`.
-    pub full: bool,
     /// Suppress the soft token warning. When the caller is writing to a
     /// file (the default), there's no preview to overflow, so the
-    /// "consider --scope / pipe to file" advice is moot and just burns
-    /// tokens. Stdout mode keeps the warning.
+    /// "pipe to a file" advice is moot and just burns tokens. Stdout
+    /// mode keeps the warning.
     pub suppress_warning: bool,
 }
 
@@ -45,10 +31,10 @@ pub struct Options {
 ///
 /// 8k chosen because that's roughly where agent CLI tool-result previews
 /// start to truncate (~30-40KB of inline output). The warning's
-/// actionable hint — pipe to a file the agent can Read, or shrink with
-/// --scope — is what agents need at THIS size, not at 20k where the
-/// output is already unrecoverable in many environments. Small repos
-/// (<8k tokens fit comfortably anywhere) don't see it.
+/// actionable hint — pipe to a file the agent can Read, or run tingle
+/// on a subdirectory — is what agents need at THIS size, not at 20k
+/// where the output is already unrecoverable in many environments.
+/// Small repos (<8k tokens fit comfortably anywhere) don't see it.
 const TOKEN_WARN_THRESHOLD: usize = 8_000;
 
 pub fn render(
@@ -63,9 +49,7 @@ pub fn render(
     // Two-pass: build body first so we can measure its token footprint,
     // then prepend a header that references the measurement. Stateless
     // and cheap at tingle's scale.
-    let body = build_body(
-        files, entries, utilities, dir_edges, callers, manifests, opts,
-    );
+    let body = build_body(files, entries, utilities, dir_edges, callers, manifests);
     let mut out = String::new();
     write_header(
         &mut out, &body, files, entries, utilities, dir_edges, manifests, opts,
@@ -111,12 +95,10 @@ fn write_header(
     )
     .unwrap();
 
-    if !opts.no_legend {
-        out.push_str(&build_legend(
-            entries, utilities, dir_edges, manifests, files, opts,
-        ));
-        out.push('\n');
-    }
+    out.push_str(&build_legend(
+        entries, utilities, dir_edges, manifests, files,
+    ));
+    out.push('\n');
 
     // Soft token warning — char/4 is a rough cl100k_base approximation.
     // Skipped when writing to a file (no preview to exceed).
@@ -133,10 +115,10 @@ fn write_header(
         // reachable by the outside agent. The agent picks a path it
         // can read back.
         // Both workarounds are lossless — file redirect keeps everything,
-        // --scope keeps everything for a subtree.
+        // running on a subdirectory keeps everything for that subtree.
         writeln!(
             out,
-            "# warning: ~{}k tokens — exceeds many agent previews. Pipe to a file your agent can Read (e.g. `tingle ... > out.md`) or zoom in with --scope PATH.",
+            "# warning: ~{}k tokens — exceeds many agent previews. Pipe to a file your agent can Read (e.g. `tingle --stdout > out.md`) or run tingle on a subdirectory (e.g. `tingle features/feed`).",
             approx_tokens / 1000
         )
         .unwrap();
@@ -155,7 +137,6 @@ fn build_legend(
     dir_edges: &HashMap<String, Vec<String>>,
     manifests: &[String],
     files: &[FileIndex],
-    opts: &Options,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -199,13 +180,9 @@ fn build_legend(
     // Tag categories — only if the Files section is rendered AND files in
     // it carry those tags.
     if files_rendered {
-        let scope = opts.scope.trim_start_matches("./").trim_end_matches('/');
-        let visible = files.iter().filter(|f| {
-            (!f.lang.is_empty() || !f.tags.is_empty())
-                && (scope.is_empty()
-                    || f.path == scope
-                    || f.path.starts_with(&format!("{}/", scope)))
-        });
+        let visible = files
+            .iter()
+            .filter(|f| !f.lang.is_empty() || !f.tags.is_empty());
         let mut tag_parts: Vec<&str> = Vec::new();
         let files_vec: Vec<&FileIndex> = visible.collect();
         if files_vec.iter().any(|f| f.tags.iter().any(|t| t == "M")) {
@@ -236,17 +213,13 @@ fn build_legend(
     }
 
     // [orphan] marker — only emitted when at least one F record will
-    // carry it. Same scope-aware visibility check the tag categories use.
+    // carry it.
     if files_rendered {
-        let scope = opts.scope.trim_start_matches("./").trim_end_matches('/');
         let entry_paths: std::collections::HashSet<&str> =
             entries.iter().map(|e| e.path.as_str()).collect();
         let kotlin_peers = jvm::kotlin_packages_with_peers(files);
         let any_orphan = files.iter().any(|f| {
             (!f.lang.is_empty() || !f.tags.is_empty())
-                && (scope.is_empty()
-                    || f.path == scope
-                    || f.path.starts_with(&format!("{}/", scope)))
                 && f.in_deg == 0
                 && !f.defs.is_empty()
                 && !entry_paths.contains(f.path.as_str())
@@ -264,11 +237,9 @@ fn build_legend(
     }
 
     // Def-kind markers — only if the F section will actually render defs.
-    // Utilities no longer emit inline defs (they'd duplicate F section
-    // content). `--compact` drops F-section defs too. In both cases the
-    // def-kinds legend would advertise markers that never appear, which
-    // is the exact UX bug this section was designed to prevent.
-    let has_defs = opts.full && files_rendered && files.iter().any(|f| !f.defs.is_empty());
+    // Utilities never emit inline defs (they'd duplicate F section content,
+    // so the def-kinds legend would advertise markers that don't fire there).
+    let has_defs = files_rendered && files.iter().any(|f| !f.defs.is_empty());
     if has_defs {
         let mut kinds: Vec<&str> = Vec::new();
         let iter_defs = || files.iter().flat_map(|f| f.defs.iter());
@@ -310,7 +281,6 @@ fn build_body(
     dir_edges: &HashMap<String, Vec<String>>,
     callers: &HashMap<String, Vec<String>>,
     manifests: &[String],
-    opts: &Options,
 ) -> String {
     let mut b = String::new();
 
@@ -368,11 +338,15 @@ fn build_body(
             let caller_str = if cs.is_empty() {
                 String::new()
             } else {
-                // Default shows 1 caller; --full opens up to 3.
-                // Caller paths are architecture labels (the utility itself
-                // is the anchor) — compact Gradle boilerplate for tokens.
-                let cap = if opts.full { 3 } else { 1 };
-                let max_show = cap.min(cs.len());
+                // Show up to 10 callers. Utilities with fan-in ≤ 10 are
+                // fully enumerated (no `+N more` forcing a grep for
+                // blast-radius). Above that, we truncate — listing 25
+                // paths adds bytes without meaningfully changing the
+                // agent's action. Caller paths are architecture labels
+                // (the utility itself is the anchor), so we compact
+                // Gradle source-root boilerplate.
+                const CALLERS_CAP: usize = 10;
+                let max_show = CALLERS_CAP.min(cs.len());
                 let short: Vec<String> = cs[..max_show]
                     .iter()
                     .map(|c| compact_label_path(c))
@@ -430,13 +404,9 @@ fn build_body(
     }
 
     // Files
-    let scope = opts.scope.trim_start_matches("./").trim_end_matches('/');
     let mut visible: Vec<&FileIndex> = files
         .iter()
         .filter(|f| !f.lang.is_empty() || !f.tags.is_empty())
-        .filter(|f| {
-            scope.is_empty() || f.path == scope || f.path.starts_with(&format!("{}/", scope))
-        })
         .collect();
     if visible.is_empty() {
         return b;
@@ -483,18 +453,18 @@ fn build_body(
         if dir.is_empty() {
             // Repo-root files: no header, render full path.
             for f in children {
-                write_file_line(&mut b, f, &f.path, opts, &orphan_paths);
+                write_file_line(&mut b, f, &f.path, &orphan_paths);
             }
         } else if children.len() == 1 {
             // Singleton group: the `### <dir>` header costs more than it
             // saves. Render the lone file with its full path, no header.
             let f = children[0];
-            write_file_line(&mut b, f, &f.path, opts, &orphan_paths);
+            write_file_line(&mut b, f, &f.path, &orphan_paths);
         } else {
             writeln!(b, "### {}", dir).unwrap();
             for f in children {
                 let name = basename(&f.path);
-                write_file_line(&mut b, f, name, opts, &orphan_paths);
+                write_file_line(&mut b, f, name, &orphan_paths);
             }
         }
     }
@@ -506,7 +476,6 @@ fn write_file_line(
     b: &mut String,
     f: &FileIndex,
     display_name: &str,
-    opts: &Options,
     orphan_paths: &std::collections::HashSet<&str>,
 ) {
     let mut tag_str = String::new();
@@ -544,9 +513,7 @@ fn write_file_line(
         )
     };
     writeln!(b, "F {}{} {}{}", display_name, loc_str, tag_str, imps).unwrap();
-    if opts.full {
-        write_defs(b, &f.defs);
-    }
+    write_defs(b, &f.defs);
 }
 
 fn write_defs(b: &mut String, defs: &[Symbol]) {
@@ -627,7 +594,6 @@ mod tests {
         Options {
             version: "v0".into(),
             gen_date: "2026-04-19".into(),
-            no_legend: true,
             ..Default::default()
         }
     }
@@ -701,72 +667,24 @@ mod tests {
     }
 
     #[test]
-    fn scope_filters_files_section() {
-        let a = FileIndex {
-            path: "core/a.ts".into(),
-            lang: "ts".into(),
-            ..Default::default()
-        };
-        let b = FileIndex {
-            path: "app/b.ts".into(),
-            lang: "ts".into(),
-            ..Default::default()
-        };
-        let opts = Options {
-            version: "v0".into(),
-            gen_date: "2026-04-19".into(),
-            no_legend: true,
-            scope: "core".into(),
-            ..Default::default()
-        };
-        let out = render(
-            &[a, b],
-            &[],
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            &opts,
-        );
-        // Singleton after scope filter → full path.
-        assert!(out.contains("F core/a.ts "), "{}", out);
-        assert!(!out.contains("F app/b.ts"), "{}", out);
-    }
-
-    #[test]
-    fn default_drops_per_file_defs() {
-        // Compact-by-default: F records render path + imports + tags only.
+    fn defs_always_rendered_in_f_section() {
+        // One output shape: F records always include def listings. Used to
+        // be gated on `--full`, which was removed — file-based consumption
+        // has no token cap, so there's no point truncating.
         let f = FileIndex {
             path: "src/a.ts".into(),
             lang: "ts".into(),
             defs: vec![make_def("foo", 5, SymbolKind::Func)],
             ..Default::default()
         };
-        let opts = opts_minimal(); // full = false
+        let opts = opts_minimal();
         let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
         assert!(out.contains("F src/a.ts "), "{}", out);
         assert!(
-            !out.contains(" 5 f foo"),
-            "default mode must not emit defs:\n{}",
+            out.contains(" 5 f foo"),
+            "defs expected on every F:\n{}",
             out
         );
-    }
-
-    #[test]
-    fn full_flag_re_emits_per_file_defs() {
-        let f = FileIndex {
-            path: "src/a.ts".into(),
-            lang: "ts".into(),
-            defs: vec![make_def("foo", 5, SymbolKind::Func)],
-            ..Default::default()
-        };
-        let opts = Options {
-            full: true,
-            ..opts_minimal()
-        };
-        let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
-        assert!(out.contains("F src/a.ts "), "{}", out);
-        assert!(out.contains(" 5 f foo"), "--full must emit defs:\n{}", out);
     }
 
     #[test]
@@ -989,10 +907,7 @@ mod tests {
             defs: vec![make_def("foo", 1, SymbolKind::Func)],
             ..Default::default()
         };
-        let opts = Options {
-            no_legend: false,
-            ..opts_minimal()
-        };
+        let opts = opts_minimal();
         let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
         assert!(out.contains("F src/big.ts (378)"), "{}", out);
         // Legend advertises `(N=loc)` so agents know the parens are a count.
@@ -1009,10 +924,7 @@ mod tests {
             defs: vec![make_def("foo", 1, SymbolKind::Func)],
             ..Default::default()
         };
-        let opts = Options {
-            no_legend: false,
-            ..opts_minimal()
-        };
+        let opts = opts_minimal();
         let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
         assert!(!out.contains("(0)"), "{}", out);
         // Legend falls back to plain `F=file` when no file has a LOC.
