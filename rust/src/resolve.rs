@@ -9,13 +9,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::lang::jvm;
+use crate::lang::{jvm, vue};
 use crate::model::FileIndex;
 
 pub type Aliases = HashMap<String, String>;
 
 /// Default extensions to try, in rough order of likelihood.
-const CANDIDATE_EXTS: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".go", ".kt"];
+const CANDIDATE_EXTS: &[&str] = &[
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".vue", ".py", ".go", ".kt",
+];
 
 /// Rewrite `f.imports` in place and populate `f.resolved_imports`.
 ///
@@ -28,6 +30,7 @@ const CANDIDATE_EXTS: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", "
 pub fn all(files: &mut [FileIndex], aliases: &Aliases) {
     let have: HashSet<String> = files.iter().map(|f| f.path.clone()).collect();
     let kotlin_index = jvm::build_kotlin_index(files);
+    let vue_index = vue::build_component_index(files);
 
     for f in files.iter_mut() {
         let from = f.path.clone();
@@ -92,6 +95,21 @@ pub fn all(files: &mut [FileIndex], aliases: &Aliases) {
                 if let Some(path) = jvm::resolve_same_package_ref(r, &f.package, &kotlin_index) {
                     if path != from {
                         resolved.push(path);
+                    }
+                }
+            }
+        }
+
+        // Vue template refs: `<Foo />` in a `<template>` block resolves to
+        // `components/Foo.vue` via Nuxt / unplugin-vue-components
+        // auto-registration. Without this backfill, Vue projects that rely
+        // on auto-import look entirely orphan — the reviewer-dropped
+        // Slidev repo is the canonical failure mode.
+        if vue::is_vue_ext(&f.ext) {
+            for r in &f.refs {
+                if let Some(path) = vue_index.get(r) {
+                    if path != &from {
+                        resolved.push(path.clone());
                     }
                 }
             }
@@ -455,6 +473,64 @@ mod tests {
         );
         // Display collapses to the compact `<module>/<ClassName>` form.
         assert_eq!(files[0].imports, vec!["app/AresApplication"]);
+    }
+
+    fn vue(path: &str) -> FileIndex {
+        FileIndex {
+            path: path.to_string(),
+            ext: ".vue".into(),
+            lang: "vue".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn vue_template_ref_resolves_to_component_file() {
+        // Slidev-style: a `.vue` page references `<Badge />` with no import
+        // because Nuxt/unplugin-vue-components auto-registers
+        // `components/**`. The ref-based resolver has to backfill the edge.
+        let mut files = vec![
+            {
+                let mut f = vue("src/pages/Home.vue");
+                f.refs = vec!["Badge".into(), "Callout".into()];
+                f
+            },
+            vue("src/components/Badge.vue"),
+            vue("src/components/Callout.vue"),
+        ];
+        all(&mut files, &HashMap::new());
+        assert!(files[0]
+            .resolved_imports
+            .contains(&"src/components/Badge.vue".into()));
+        assert!(files[0]
+            .resolved_imports
+            .contains(&"src/components/Callout.vue".into()));
+        // Template refs don't render as F-record imports (no source-level
+        // `import` string existed).
+        assert!(files[0].imports.is_empty());
+    }
+
+    #[test]
+    fn vue_template_ref_ignores_unknown_and_self() {
+        // `Unknown` isn't a repo component (framework built-in or typo) —
+        // no edge. `Home` matches this file — no self-edge.
+        let mut files = vec![{
+            let mut f = vue("src/pages/Home.vue");
+            f.refs = vec!["Unknown".into(), "Home".into()];
+            f
+        }];
+        all(&mut files, &HashMap::new());
+        assert!(files[0].resolved_imports.is_empty());
+    }
+
+    #[test]
+    fn vue_explicit_import_resolves_with_vue_in_candidate_exts() {
+        // Extensionless `./Badge` imports should still resolve when the
+        // target is a `.vue` file — `.vue` is in CANDIDATE_EXTS.
+        let mut files = vec![vue("src/pages/Home.vue"), vue("src/pages/Badge.vue")];
+        files[0].imports = vec!["./Badge".into()];
+        all(&mut files, &HashMap::new());
+        assert_eq!(files[0].imports, vec!["src/pages/Badge.vue"]);
     }
 
     #[test]

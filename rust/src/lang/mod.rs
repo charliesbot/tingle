@@ -8,3 +8,4 @@
 //! per-language branches.
 
 pub mod jvm;
+pub mod vue;

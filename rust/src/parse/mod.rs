@@ -237,6 +237,52 @@ fn compiled_for(def: &'static LangDef) -> &'static CompiledLang {
 /// `PACKAGE_STATS`.
 pub fn all(repo: &Path, files: &mut [FileIndex], stats: &Stats) {
     files.par_iter_mut().for_each(|f| {
+        // Vue SFCs mix three languages in one file: `<script>` (JS/TS),
+        // `<template>` (HTML-ish with component refs), `<style>` (CSS).
+        // We split the sections here, hand `<script>` to the existing
+        // TS/JS grammar, and scan `<template>` for `<PascalCase>` refs.
+        // Style blocks are ignored — tingle doesn't parse styles for any
+        // language. No `tree-sitter-vue` dependency (upstream archived).
+        if crate::lang::vue::is_vue_ext(&f.ext) {
+            let full = repo.join(&f.path);
+            let Ok(data) = std::fs::read(&full) else {
+                stats.read_errors.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            f.loc = count_lines(&data);
+            f.lang = "vue".to_string();
+            let src = std::str::from_utf8(&data).unwrap_or("");
+            let sections = crate::lang::vue::split_sfc(src);
+            if !sections.script.is_empty() {
+                let script_ext = if sections.script_lang == "ts" {
+                    ".ts"
+                } else {
+                    ".js"
+                };
+                if let Some(def) = lang_for(script_ext) {
+                    let compiled = compiled_for(def);
+                    let mut parser = Parser::new();
+                    if parser.set_language(&compiled.language).is_ok() {
+                        if let Some(tree) = parser.parse(sections.script.as_bytes(), None) {
+                            let extracted = extract::extract_one(
+                                &compiled.query,
+                                tree.root_node(),
+                                sections.script.as_bytes(),
+                            );
+                            f.defs = extracted.defs;
+                            f.imports = extracted.imports;
+                        }
+                    }
+                }
+            }
+            // Template refs become graph edges via resolve.rs; they don't
+            // render in the F record's import list (no corresponding
+            // source-level `import` string existed).
+            f.refs = crate::lang::vue::extract_template_refs(&sections.template);
+            stats.parsed_ok.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
         // AndroidManifest.xml gets first-class treatment — it declares
         // runtime entry points (Activities/Services/etc.) that the
         // import-based graph can't see otherwise. Not tree-sitter-driven
