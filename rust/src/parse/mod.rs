@@ -250,7 +250,14 @@ pub fn all(repo: &Path, files: &mut [FileIndex], stats: &Stats) {
             f.loc = count_lines(&data);
             f.lang = "androidManifest".to_string();
             let xml = std::str::from_utf8(&data).unwrap_or("");
-            f.imports = crate::lang::jvm::extract_android_manifest_refs(xml);
+            // Modern AGP (7.4+) moved the manifest's `package=` attribute
+            // to `namespace` in build.gradle.kts. Read the sibling script
+            // so leading-dot `android:name=".Foo"` still resolves.
+            let fallback_ns = crate::lang::jvm::gradle_script_for_manifest(&f.path)
+                .and_then(|rel| std::fs::read_to_string(repo.join(&rel)).ok())
+                .map(|src| crate::lang::jvm::extract_gradle_namespace(&src))
+                .unwrap_or_default();
+            f.imports = crate::lang::jvm::extract_android_manifest_refs(xml, &fallback_ns);
             stats.parsed_ok.fetch_add(1, Ordering::Relaxed);
             return;
         }

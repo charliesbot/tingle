@@ -16,15 +16,16 @@ Binary: rust/target/release/tingle
 | charliesbot.dev | 32 | 42 ms | 51 MB | 3.4 KB | 1.1k |
 | one | 166 | 74 ms | 85 MB | 35.4 KB | 8.6k |
 
-## Output-shrink flags on the largest repo
+## Zooming in on large repos
 
-Demonstrates `--scope` on the largest repo — the knob agents reach for
-when the default output is too big to fit in one tool-result turn.
+No output-shape flags remain (see `design-doc.md` for the rationale).
+If the default map is larger than you want, run tingle on a
+subdirectory — the whole pipeline scopes to it naturally.
 
 Largest repo: `one`
 
 | Invocation | Output bytes | Output tokens |
 | --- | --- | --- |
-| default | 35.4 KB | 8.6k |
-| `--scope app` | 16.0 KB | 4.1k |
-| `--scope complications` | 13.3 KB | 3.4k |
+| `tingle .` | 35.4 KB | 8.6k |
+| `tingle app` | 16.0 KB | 4.1k |
+| `tingle complications` | 13.3 KB | 3.4k |

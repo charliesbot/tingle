@@ -6,7 +6,7 @@ Internals reference for `tingle`. For the user-facing surface (install, flags, o
 
 1. Walk the repo; parse each source file with tree-sitter.
 2. Extract top-level defs and imports per file.
-3. Rank files as **entry points** (high imports-out) and **utilities** (high imports-in).
+3. Rank files as **hotspots** (high imports-out, or matching entry conventions) and **utilities** (high imports-in).
 4. Fold module-to-module import edges into the `M` layer.
 5. Emit the ranked sections + per-file records with line anchors.
 
@@ -30,7 +30,7 @@ Binary: 12 MB stripped.
 
 ### Eval (agent task quality)
 
-The compact default layout preserves task quality at ≥0.97 mean score across three real repos, at 47-58% of the token cost vs `--full`. Harness in [`evals/README.md`](evals/README.md).
+Historical eval rationale (three real repos, 47-58% token savings at ≥0.97 mean score) informed the original compact-vs-full split. That split is gone — file-based consumption has no token cap (agents `Read` the file directly), so tingle now emits a single rich shape: def signatures + full import lists + up to 10 utility callers. Harness lives on in [`evals/README.md`](evals/README.md) for future regressions.
 
 ## Development
 

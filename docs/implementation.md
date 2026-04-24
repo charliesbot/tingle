@@ -179,7 +179,7 @@ utilities(files):
 
 Critical distinction governing every path-rendering decision:
 
-- **Anchors** are paths the agent will use with `Read(path, line=N)`. They must stay full and accurate. EP records, U record paths, F record paths, and `### <dir>` group headers are anchors.
+- **Anchors** are paths the agent will use with `Read(path, line=N)`. They must stay full and accurate. H records, U record paths, F record paths, O records, and `### <dir>` group headers are anchors.
 - **Labels** are architecture signals. The agent never `Read`s a directory or a U-record's caller list entry. M record dirs and U caller lists are labels.
 
 Only labels can be compressed. `compact_label_path` (in `rust/src/lang/jvm.rs`) strips the Gradle source-root boilerplate (`<module>/src/main/<lang>/com/<org>/<proj>/`) from labels; anchors are always full.
@@ -192,17 +192,34 @@ S package.json  scripts: ...
 S package.json  bin: ... main: ...
 S go.mod        module=... go=...
 
-## Entry points   (omitted if empty)
-EP <full-path>:<line> <name> (out=N in=M) [hub]?
-                                          # [hub] only if file ALSO appears in U
-                                          # — orchestrator role doesn't fit
-                                          # cleanly as either entry or utility
+## Hotspots       (omitted if empty)
+H <full-path>:<line> <name> (out=N in=M) [hub]?
+                                          # Formerly "Entry points" — four
+                                          # reviewer rounds found the old
+                                          # name misled agents expecting
+                                          # main()-style nodes. The heuristic
+                                          # blends convention + manifest +
+                                          # shebang + out_deg−in_deg.
+                                          # [hub] only if file ALSO appears
+                                          # in U — orchestrator role.
 
 ## Utilities      (omitted if empty)
-U <full-path> (in=N)  ← <caller-label>+              # 1 caller by default,
-                                                     # 3 with --full;
-                                                     # callers use compact labels
-                                                     # (drop Gradle boilerplate)
+U <full-path> (in=N prod=M)? ← <caller-label>+       # Full caller list, no
+                                                     # truncation. `prod=` is
+                                                     # the non-test caller count;
+                                                     # shown only when some
+                                                     # callers are test-tagged
+                                                     # (the prod number is what
+                                                     # matters for blast-radius).
+                                                     # Labels compact Gradle
+                                                     # source-root boilerplate.
+
+## Orphans        (omitted if empty)
+O <full-path> (loc=N)                    # File with defs that nothing imports
+                                         # AND isn't a hotspot AND isn't a
+                                         # test. May still be wired at runtime
+                                         # (DI, Manifest, reflection) — agent
+                                         # verifies.
 
 ## Modules        (omitted if no edges)
 M <src-label> -> <dst-label>+            # All labels via compact_label_path,
@@ -215,13 +232,12 @@ M <src-label> -> <dst-label>+            # All labels via compact_label_path,
 ### <parent-dir-anchor>                  # Group header for dirs with ≥2 files;
                                          # singleton dirs skip the header (the
                                          # `###` would cost more than it saves)
-F <basename-or-full-path> <tag-string>  imp: <imports> (+N more)?
+F <basename-or-full-path> (loc)? <tag-string>  imp: <imports> (+N more)?
                                          # tags: [M] [untracked] [test] [hub] [orphan]
                                          # imports: display strings, capped at 10
                                          # with `(+N more)` overflow
-                                         # No def listings by default;
-                                         # `--full` enables them
- <line> <kind> <signature>               # Only with --full; one space prefix
+                                         # Def listings always emitted below.
+ <line> <kind> <signature>               # One space prefix
   <line> <kind> <signature>              # Class-attached method; two spaces
 ```
 
@@ -231,11 +247,14 @@ Only mentions categories that actually appear in this run:
 
 ```
 # legend:
-   {S=manifest}? {EP=entry(out=imports-out,in=imports-in)}?
-   {U=utility(in=fan-in)}? {M=module-edge}? {F=file}?
+   {S=manifest}? {H=hotspot(out=imports-out,in=imports-in)}?
+   {U=utility(in=fan-in,prod=non-test-callers)}?
+   {M=module-edge(src->dst=src-imports-dst)}?
+   {F=file(N=loc)|F=file}?
+   {O=orphan(no-import-callers,may-be-runtime-registered) [orphan]=same-as-O}?
    {[M]=modified}? {[untracked]=new-unstaged}? {[test]=test-file}?
-   {[hub]=both-entry-and-utility}?
-   {[path:line]=def f=func c=class m=method i=interface t=type e=enum}?  # only with --full
+   {[hub]=both-hotspot-and-utility}?
+   {[path:line]=def f=func c=class m=method i=interface t=type e=enum}?
 ```
 
 Prevents the "legend over-promises" UX bug where agents see `S=manifest` in the legend on a Kotlin Gradle project (no `package.json`/`go.mod` → no S records) and waste effort looking for what isn't there.
@@ -245,7 +264,7 @@ Prevents the "legend over-promises" UX bug where agents see `S=manifest` in the 
 When `(body + header) / 4 > 20_000`, prepend a line:
 
 ```
-# warning: ~Nk tokens — pipe to a file or zoom in with --scope PATH
+# warning: ~Nk tokens — pipe to a file or run tingle on a subdirectory
 ```
 
 No automatic pruning. Agent decides. Threshold is char/4 — a rough cl100k_base approximation. 20k matches the typical "fits in one tool result with room for reply" budget across most agent environments.
@@ -257,11 +276,7 @@ No automatic pruning. Agent decides. Threshold is char/4 — a rough cl100k_base
 ```
 tingle [REPO]                           # writes <REPO>/.tinglemap.md; prints status line
 tingle --stdout [REPO]                  # print map to stdout (for pipelines)
-tingle --out PATH [REPO]                # write to PATH instead of .tinglemap.md
-tingle --full [REPO]                    # add per-file def signatures + 3 callers/U
-tingle --scope PATH [REPO]              # filter F section to subtree
-tingle --alias PREFIX:PATH [REPO]       # repeatable; alias-substitute imports
-tingle --no-legend [REPO]               # skip the legend line
+tingle --alias PREFIX:PATH [REPO]       # repeatable; TS/webpack import alias
 tingle --version
 ```
 

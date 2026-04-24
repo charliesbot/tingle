@@ -9,13 +9,15 @@
 //!
 //! ```text
 //! tingle [REPO]                   # write .tinglemap.md; print status line
-//! tingle --stdout [REPO]          # print map to stdout (old default)
-//! tingle --out PATH [REPO]        # write to PATH instead of .tinglemap.md
-//! tingle --alias PREFIX:PATH ...  # import alias substitution
-//! tingle --scope PATH ...         # filter F section to subtree
-//! tingle --full ...               # include per-file def signatures
-//! tingle --no-legend ...          # skip the legend line
+//! tingle --stdout [REPO]          # print map to stdout (for pipelines)
+//! tingle --alias PREFIX:PATH ...  # import alias substitution (TS/webpack)
 //! ```
+//!
+//! No output-shape toggles. One rich default: def signatures, full
+//! import lists, up to 10 callers per utility. File-based consumption
+//! has no token cap (agents `Read` it directly), so truncation earns
+//! nothing. If the repo is so large that the default is too much,
+//! run tingle on a subdirectory: `tingle features/feed`.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -47,40 +49,11 @@ struct Args {
     #[arg(long = "stdout")]
     stdout: bool,
 
-    /// Write the map to PATH instead of the default
-    /// `<REPO>/.tinglemap.md`. Use this only if you want a different
-    /// location than the default — most agents should just rely on
-    /// `<REPO>/.tinglemap.md` and `Read('./.tinglemap.md')`. Ignored
-    /// when `--stdout` is set.
-    #[arg(long = "out", value_name = "PATH")]
-    out: Option<PathBuf>,
-
     /// Map an import prefix to a repo path; repeatable (e.g. `--alias '@:src'`).
+    /// Needed for TypeScript projects that use `tsconfig.json`
+    /// `paths` — without it, `@/foo` imports stay unresolved.
     #[arg(long = "alias", value_name = "PREFIX:PATH", action = clap::ArgAction::Append)]
     alias: Vec<String>,
-
-    /// Omit the legend header line.
-    #[arg(long = "no-legend")]
-    no_legend: bool,
-
-    /// Filter the Files section to paths under PATH. Top sections
-    /// (Manifests, Entry points, Utilities, Modules) still render
-    /// whole-repo context.
-    #[arg(long = "scope", value_name = "PATH")]
-    scope: Option<String>,
-
-    /// Include per-file def listings in the Files section AND show up to 3
-    /// callers per Utility record. Default is the compact layout
-    /// (paths/imports/tags only, 1 caller per U), which preserves agent
-    /// task quality (eval mean ≥0.97 across 3 real repos) at 47-58% of
-    /// the token cost.
-    #[arg(long = "full")]
-    full: bool,
-
-    /// Deprecated: compact is now the default. Accepted as a no-op for
-    /// backwards compatibility with older scripts.
-    #[arg(long = "compact", hide = true)]
-    _compat_compact: bool,
 }
 
 fn main() -> ExitCode {
@@ -122,12 +95,12 @@ fn main() -> ExitCode {
     let g = rank::graph(&mut files);
     let m = manifest::scan(&repo_abs);
 
-    let entries = rank::entry_points(
+    let hotspots = rank::hotspots(
         &files,
-        rank::EntryPointsOpts {
+        rank::HotspotsOpts {
             repo: &repo_abs,
             manifest_ep: &m.entry_targets,
-            max_eps: 15,
+            max_hotspots: 15,
         },
     );
     let utilities = rank::utilities(&files, &g.callers);
@@ -140,17 +113,13 @@ fn main() -> ExitCode {
         version: env!("CARGO_PKG_VERSION").to_string(),
         commit: short_git_commit(&repo_abs),
         tokenizer_id: "cl100k_base".to_string(),
-        no_legend: args.no_legend,
-        tokens_approx: 0,
         gen_date,
-        scope: args.scope.unwrap_or_default(),
-        full: args.full,
         suppress_warning: !args.stdout,
     };
 
     let map = render::render(
         &files,
-        &entries,
+        &hotspots,
         &utilities,
         &g.dir_edges,
         &g.callers,
@@ -158,16 +127,14 @@ fn main() -> ExitCode {
         &opts,
     );
 
-    // Decide output destination: --stdout wins over --out; --out wins
-    // over default. When writing a file, stdout gets a one-line status
-    // instead of the map (so downstream tools can log / detect the
-    // path without parsing the map).
+    // Decide output destination. With `--stdout` the map goes straight
+    // to stdout (for pipelines). Otherwise write to
+    // `<REPO>/.tinglemap.md` and emit a one-line status — downstream
+    // tools can detect the path without parsing the map.
     if args.stdout {
         print!("{}", map);
     } else {
-        let out_path = args
-            .out
-            .unwrap_or_else(|| repo_abs.join(DEFAULT_OUTPUT_FILE));
+        let out_path = repo_abs.join(DEFAULT_OUTPUT_FILE);
         match write_atomic(&out_path, map.as_bytes()) {
             Ok(()) => {
                 let bytes = map.len();

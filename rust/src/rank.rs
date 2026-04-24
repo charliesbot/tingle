@@ -1,8 +1,14 @@
-//! Ranking: entry points, utilities, module-edge graph.
+//! Ranking: hotspots, utilities, module-edge graph.
 //!
 //! Mirrors `internal/rank/rank.go`. Scoring blends filename conventions,
 //! shebang detection, manifest-declared entries, (out − in) degree, and a
 //! root-export bonus. Utility rank = in-degree.
+//!
+//! The section was called "Entry points" originally — feedback from four
+//! independent reviewers was that the name misled agents into expecting
+//! main()-style nodes. The heuristic actually surfaces "files with many
+//! outbound edges, or that match entry conventions" — closer to a
+//! load-bearing hotspot than a literal entry. Renamed to `hotspots`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -80,18 +86,18 @@ pub fn graph(files: &mut [FileIndex]) -> GraphOutput {
     GraphOutput { dir_edges, callers }
 }
 
-pub struct EntryPointsOpts<'a> {
+pub struct HotspotsOpts<'a> {
     pub repo: &'a Path,
     pub manifest_ep: &'a [String],
-    pub max_eps: usize,
+    pub max_hotspots: usize,
 }
 
-/// Return files ranked by the entry-point heuristic, capped at `max_eps`
+/// Return files ranked by the hotspot heuristic, capped at `max_hotspots`
 /// with score > 0. Test-tagged files are excluded — they're probes, not
-/// entries (feedback from multiple real-use agents: test files kept
+/// hotspots (feedback from multiple real-use agents: test files kept
 /// outranking production ViewModels/Services with only slightly higher
 /// out_deg).
-pub fn entry_points<'a>(files: &'a [FileIndex], opts: EntryPointsOpts) -> Vec<&'a FileIndex> {
+pub fn hotspots<'a>(files: &'a [FileIndex], opts: HotspotsOpts) -> Vec<&'a FileIndex> {
     let manifest_set: HashSet<&str> = opts.manifest_ep.iter().map(|s| s.as_str()).collect();
 
     let mut scored: Vec<(i32, &FileIndex)> = Vec::new();
@@ -110,7 +116,11 @@ pub fn entry_points<'a>(files: &'a [FileIndex], opts: EntryPointsOpts) -> Vec<&'
     // Stable sort desc by score.
     scored.sort_by_key(|x| std::cmp::Reverse(x.0));
 
-    let cap = if opts.max_eps == 0 { 15 } else { opts.max_eps };
+    let cap = if opts.max_hotspots == 0 {
+        15
+    } else {
+        opts.max_hotspots
+    };
     let n = cap.min(scored.len());
     scored.into_iter().take(n).map(|(_, f)| f).collect()
 }
@@ -343,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_points_filter_test_tagged_files() {
+    fn hotspots_filter_test_tagged_files() {
         let repo = Path::new("/nonexistent");
         let mut real = fi("app/src/main/VM.kt", "kt");
         real.out_deg = 10;
@@ -351,12 +361,12 @@ mod tests {
         test.out_deg = 15;
         test.tags = vec!["test".into()];
         let files = vec![real, test];
-        let eps = entry_points(
+        let eps = hotspots(
             &files,
-            EntryPointsOpts {
+            HotspotsOpts {
                 repo,
                 manifest_ep: &[],
-                max_eps: 15,
+                max_hotspots: 15,
             },
         );
         assert_eq!(eps.len(), 1);
@@ -364,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_points_rank_by_score() {
+    fn hotspots_rank_by_score() {
         let repo = Path::new("/nonexistent");
         let mut main = fi("cmd/server/main.go", "go");
         main.out_deg = 5;
@@ -373,12 +383,12 @@ mod tests {
         let mut util = fi("src/util.ts", "ts");
         util.in_deg = 10;
         let files = vec![main, idx, util];
-        let eps = entry_points(
+        let eps = hotspots(
             &files,
-            EntryPointsOpts {
+            HotspotsOpts {
                 repo,
                 manifest_ep: &[],
-                max_eps: 15,
+                max_hotspots: 15,
             },
         );
         let names: Vec<&str> = eps.iter().map(|f| f.path.as_str()).collect();

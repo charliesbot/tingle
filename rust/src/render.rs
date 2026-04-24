@@ -2,14 +2,14 @@
 //! not human-first — we optimize for the rate in bits-per-agent-answer,
 //! not for casual readability.
 //!
-//! Section order: Manifests, Entry points, Utilities, Modules, Files.
+//! Section order: Manifests, Hotspots, Utilities, Modules, Orphans, Files.
 //! Empty sections are omitted. The legend line is context-aware — it only
 //! mentions prefix/tag categories that actually appear in THIS run.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
-use crate::lang::jvm::{self, compact_label_path};
+use crate::lang::jvm::compact_label_path;
 use crate::model::{FileIndex, Symbol};
 
 #[derive(Default, Clone)]
@@ -17,26 +17,12 @@ pub struct Options {
     pub version: String,
     pub commit: String,
     pub tokenizer_id: String,
-    pub no_legend: bool,
-    pub tokens_approx: u32,
     /// ISO date (UTC) used in the `gen=...` header.
     pub gen_date: String,
-    /// `--scope <PATH>`: filter the `## Files` section to paths under this
-    /// prefix. Top sections still render whole-repo context. Empty = no
-    /// filter.
-    pub scope: String,
-    /// `--full`: include per-file def listings in the `## Files` section
-    /// AND show up to 3 callers per Utility record.
-    ///
-    /// Default is the compact layout: F records list paths/imports/tags
-    /// only and U records show 1 caller. Eval (`evals/run.sh` × 3 real
-    /// repos) showed the compact layout preserves agent task quality
-    /// (≥0.97 mean score) while saving 47-58% of tokens vs `--full`.
-    pub full: bool,
     /// Suppress the soft token warning. When the caller is writing to a
     /// file (the default), there's no preview to overflow, so the
-    /// "consider --scope / pipe to file" advice is moot and just burns
-    /// tokens. Stdout mode keeps the warning.
+    /// "pipe to a file" advice is moot and just burns tokens. Stdout
+    /// mode keeps the warning.
     pub suppress_warning: bool,
 }
 
@@ -45,15 +31,15 @@ pub struct Options {
 ///
 /// 8k chosen because that's roughly where agent CLI tool-result previews
 /// start to truncate (~30-40KB of inline output). The warning's
-/// actionable hint — pipe to a file the agent can Read, or shrink with
-/// --scope — is what agents need at THIS size, not at 20k where the
-/// output is already unrecoverable in many environments. Small repos
-/// (<8k tokens fit comfortably anywhere) don't see it.
+/// actionable hint — pipe to a file the agent can Read, or run tingle
+/// on a subdirectory — is what agents need at THIS size, not at 20k
+/// where the output is already unrecoverable in many environments.
+/// Small repos (<8k tokens fit comfortably anywhere) don't see it.
 const TOKEN_WARN_THRESHOLD: usize = 8_000;
 
 pub fn render(
     files: &[FileIndex],
-    entries: &[&FileIndex],
+    hotspots: &[&FileIndex],
     utilities: &[&FileIndex],
     dir_edges: &HashMap<String, Vec<String>>,
     callers: &HashMap<String, Vec<String>>,
@@ -63,12 +49,10 @@ pub fn render(
     // Two-pass: build body first so we can measure its token footprint,
     // then prepend a header that references the measurement. Stateless
     // and cheap at tingle's scale.
-    let body = build_body(
-        files, entries, utilities, dir_edges, callers, manifests, opts,
-    );
+    let body = build_body(files, hotspots, utilities, dir_edges, callers, manifests);
     let mut out = String::new();
     write_header(
-        &mut out, &body, files, entries, utilities, dir_edges, manifests, opts,
+        &mut out, &body, files, hotspots, utilities, dir_edges, manifests, opts,
     );
     out.push_str(&body);
     out
@@ -79,7 +63,7 @@ fn write_header(
     out: &mut String,
     body: &str,
     files: &[FileIndex],
-    entries: &[&FileIndex],
+    hotspots: &[&FileIndex],
     utilities: &[&FileIndex],
     dir_edges: &HashMap<String, Vec<String>>,
     manifests: &[String],
@@ -111,12 +95,10 @@ fn write_header(
     )
     .unwrap();
 
-    if !opts.no_legend {
-        out.push_str(&build_legend(
-            entries, utilities, dir_edges, manifests, files, opts,
-        ));
-        out.push('\n');
-    }
+    out.push_str(&build_legend(
+        hotspots, utilities, dir_edges, manifests, files,
+    ));
+    out.push('\n');
 
     // Soft token warning — char/4 is a rough cl100k_base approximation.
     // Skipped when writing to a file (no preview to exceed).
@@ -133,10 +115,10 @@ fn write_header(
         // reachable by the outside agent. The agent picks a path it
         // can read back.
         // Both workarounds are lossless — file redirect keeps everything,
-        // --scope keeps everything for a subtree.
+        // running on a subdirectory keeps everything for that subtree.
         writeln!(
             out,
-            "# warning: ~{}k tokens — exceeds many agent previews. Pipe to a file your agent can Read (e.g. `tingle ... > out.md`) or zoom in with --scope PATH.",
+            "# warning: ~{}k tokens — exceeds many agent previews. Pipe to a file your agent can Read (e.g. `tingle --stdout > out.md`) or run tingle on a subdirectory (e.g. `tingle features/feed`).",
             approx_tokens / 1000
         )
         .unwrap();
@@ -150,12 +132,11 @@ fn write_header(
 /// where agents see `S=manifest` in the legend but no Manifests section
 /// renders.
 fn build_legend(
-    entries: &[&FileIndex],
+    hotspots: &[&FileIndex],
     utilities: &[&FileIndex],
     dir_edges: &HashMap<String, Vec<String>>,
     manifests: &[String],
     files: &[FileIndex],
-    opts: &Options,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -164,14 +145,21 @@ fn build_legend(
     if !manifests.is_empty() {
         sections.push("S=manifest");
     }
-    if !entries.is_empty() {
-        // Defines out=/in= here so agents don't have to guess the
-        // semantics from context (feedback: legend was over-promising
-        // section markers and under-explaining numeric ones).
-        sections.push("EP=entry(out=imports-out,in=imports-in)");
+    if !hotspots.is_empty() {
+        // `hotspot` instead of `entry point`: four reviewer rounds found the
+        // old name misled agents expecting main()-style nodes. The score
+        // blends convention matches, manifest-declared entries, shebangs,
+        // package-root bonus, and out_deg−in_deg, so the top of the section
+        // is often a data-layer file with fat imports, not a runtime entry.
+        sections.push("H=hotspot(out=imports-out,in=imports-in)");
     }
     if !utilities.is_empty() {
-        sections.push("U=utility(in=fan-in)");
+        // `prod=N` appears inline on a U record only when some callers are
+        // test-tagged — the non-test count is what matters for blast-radius.
+        // Documented unconditionally here so agents don't hit an unexplained
+        // field name on repos that happen to have tests. One token's cost
+        // on repos without tests.
+        sections.push("U=utility(in=fan-in,prod=non-test-callers)");
     }
     if !dir_edges.is_empty() {
         // `src -> dst` reads as "src imports from dst" — the arrow points
@@ -199,13 +187,9 @@ fn build_legend(
     // Tag categories — only if the Files section is rendered AND files in
     // it carry those tags.
     if files_rendered {
-        let scope = opts.scope.trim_start_matches("./").trim_end_matches('/');
-        let visible = files.iter().filter(|f| {
-            (!f.lang.is_empty() || !f.tags.is_empty())
-                && (scope.is_empty()
-                    || f.path == scope
-                    || f.path.starts_with(&format!("{}/", scope)))
-        });
+        let visible = files
+            .iter()
+            .filter(|f| !f.lang.is_empty() || !f.tags.is_empty());
         let mut tag_parts: Vec<&str> = Vec::new();
         let files_vec: Vec<&FileIndex> = visible.collect();
         if files_vec.iter().any(|f| f.tags.iter().any(|t| t == "M")) {
@@ -225,50 +209,33 @@ fn build_legend(
         }
     }
 
-    // [hub] marker — only emitted when at least one EP record will carry
-    // it (i.e., a file appears in both EP and U).
-    let hub_present = !entries.is_empty()
+    // [hub] marker — only emitted when at least one H record will carry
+    // it (file appears in both Hotspots and Utilities).
+    let hub_present = !hotspots.is_empty()
         && utilities
             .iter()
-            .any(|u| entries.iter().any(|e| e.path == u.path));
+            .any(|u| hotspots.iter().any(|e| e.path == u.path));
     if hub_present {
-        parts.push("[hub]=both-entry-and-utility".to_string());
+        parts.push("[hub]=both-hotspot-and-utility".to_string());
     }
 
-    // [orphan] marker — only emitted when at least one F record will
-    // carry it. Same scope-aware visibility check the tag categories use.
-    if files_rendered {
-        let scope = opts.scope.trim_start_matches("./").trim_end_matches('/');
-        let entry_paths: std::collections::HashSet<&str> =
-            entries.iter().map(|e| e.path.as_str()).collect();
-        let kotlin_peers = jvm::kotlin_packages_with_peers(files);
-        let any_orphan = files.iter().any(|f| {
-            (!f.lang.is_empty() || !f.tags.is_empty())
-                && (scope.is_empty()
-                    || f.path == scope
-                    || f.path.starts_with(&format!("{}/", scope)))
-                && f.in_deg == 0
-                && !f.defs.is_empty()
-                && !entry_paths.contains(f.path.as_str())
-                && !f.tags.iter().any(|t| t == "test")
-                && !kotlin_peers.contains(&f.package)
-        });
-        if any_orphan {
-            // Honest framing — tingle reads static imports only, so files
-            // wired through runtime registration (DI, manifests, reflection,
-            // platform-callable Services/Activities/Workers) look orphan
-            // even when they're not. The tag flags "no inbound import
-            // edge"; the agent verifies whether that means dead code.
-            parts.push("[orphan]=no-import-callers(may-be-runtime-registered)".to_string());
-        }
+    // Orphans section + [orphan] cross-reference tag — shared check.
+    // Honest framing: tingle reads static imports only, so files wired
+    // through runtime registration (DI, reflection, platform-callable
+    // Services/Workers) look orphan even when they're not. The tag flags
+    // "no inbound import edge"; the agent verifies whether that means
+    // dead code.
+    let orphans_present = files_rendered && !orphan_files(files, hotspots).is_empty();
+    if orphans_present {
+        parts.push(
+            "O=orphan(no-import-callers,may-be-runtime-registered)  [orphan]=same-as-O".into(),
+        );
     }
 
     // Def-kind markers — only if the F section will actually render defs.
-    // Utilities no longer emit inline defs (they'd duplicate F section
-    // content). `--compact` drops F-section defs too. In both cases the
-    // def-kinds legend would advertise markers that never appear, which
-    // is the exact UX bug this section was designed to prevent.
-    let has_defs = opts.full && files_rendered && files.iter().any(|f| !f.defs.is_empty());
+    // Utilities never emit inline defs (they'd duplicate F section content,
+    // so the def-kinds legend would advertise markers that don't fire there).
+    let has_defs = files_rendered && files.iter().any(|f| !f.defs.is_empty());
     if has_defs {
         let mut kinds: Vec<&str> = Vec::new();
         let iter_defs = || files.iter().flat_map(|f| f.defs.iter());
@@ -303,14 +270,42 @@ fn build_legend(
     }
 }
 
+/// Files considered orphan by tingle's syntactic pass: visible (has lang
+/// or tags), has defs, zero inbound import edges, not an entry point, not
+/// a test. Shared by the legend check, the Orphans section, and the
+/// F-record inline tag.
+///
+/// Historical note: PR #9 added a `kotlin_peers` exemption (skip Kotlin
+/// files in packages with ≥2 members) because we couldn't yet capture
+/// same-package references. That's no longer true — the tree-sitter
+/// captures for `call_expression`, `navigation_expression`, and
+/// `user_type` populate `refs`, and `resolve::all` turns those into real
+/// graph edges. If a Kotlin file survives all of that with in_deg=0, it
+/// genuinely is unreferenced by syntactic analysis. The "may be
+/// runtime-registered" caveat in the legend remains the appropriate
+/// escape hatch for reflection / DI / Manifest-wired edge cases.
+fn orphan_files<'a>(files: &'a [FileIndex], hotspots: &[&FileIndex]) -> Vec<&'a FileIndex> {
+    let hotspot_paths: std::collections::HashSet<&str> =
+        hotspots.iter().map(|e| e.path.as_str()).collect();
+    files
+        .iter()
+        .filter(|f| {
+            (!f.lang.is_empty() || !f.tags.is_empty())
+                && f.in_deg == 0
+                && !f.defs.is_empty()
+                && !hotspot_paths.contains(f.path.as_str())
+                && !f.tags.iter().any(|t| t == "test")
+        })
+        .collect()
+}
+
 fn build_body(
     files: &[FileIndex],
-    entries: &[&FileIndex],
+    hotspots: &[&FileIndex],
     utilities: &[&FileIndex],
     dir_edges: &HashMap<String, Vec<String>>,
     callers: &HashMap<String, Vec<String>>,
     manifests: &[String],
-    opts: &Options,
 ) -> String {
     let mut b = String::new();
 
@@ -324,16 +319,16 @@ fn build_body(
         b.push('\n');
     }
 
-    // Entry points. EP records that ALSO qualify as utilities (file is
-    // both heavily importing AND heavily imported) get an inline `[hub]`
-    // tag. These are orchestrator/manager files whose role doesn't fit
-    // cleanly as either entry or utility — surfacing the duality saves
-    // the agent from having to compare numbers across sections.
-    if !entries.is_empty() {
+    // Hotspots. H records that ALSO qualify as utilities (file is both
+    // heavily importing AND heavily imported) get an inline `[hub]` tag.
+    // These are orchestrator/manager files whose role doesn't fit cleanly
+    // as either — surfacing the duality saves the agent from comparing
+    // numbers across sections.
+    if !hotspots.is_empty() {
         let utility_paths: std::collections::HashSet<&str> =
             utilities.iter().map(|u| u.path.as_str()).collect();
-        b.push_str("## Entry points\n");
-        for f in entries {
+        b.push_str("## Hotspots\n");
+        for f in hotspots {
             let name = first_def_name(f);
             let line = first_def_line(f);
             let hub = if utility_paths.contains(f.path.as_str()) {
@@ -348,7 +343,7 @@ fn build_body(
             };
             writeln!(
                 b,
-                "EP {}:{} {} (out={} in={}{}){}",
+                "H {}:{} {} (out={} in={}{}){}",
                 f.path, line, name, f.out_deg, f.in_deg, loc_str, hub
             )
             .unwrap();
@@ -361,6 +356,14 @@ fn build_body(
     // zero signal gain. The U record carries path + in_deg + top callers,
     // which is what uniquely surfaces "load-bearing file."
     if !utilities.is_empty() {
+        // Two reviewers flagged that `in=23` on Result.kt is misleading
+        // when 4 of those callers are test files. Precompute the test
+        // paths so each U record can show `prod=N` alongside the total.
+        let test_paths: std::collections::HashSet<&str> = files
+            .iter()
+            .filter(|f| f.tags.iter().any(|t| t == "test"))
+            .map(|f| f.path.as_str())
+            .collect();
         b.push_str("## Utilities\n");
         for f in utilities {
             let empty: Vec<String> = Vec::new();
@@ -368,27 +371,36 @@ fn build_body(
             let caller_str = if cs.is_empty() {
                 String::new()
             } else {
-                // Default shows 1 caller; --full opens up to 3.
-                // Caller paths are architecture labels (the utility itself
-                // is the anchor) — compact Gradle boilerplate for tokens.
-                let cap = if opts.full { 3 } else { 1 };
-                let max_show = cap.min(cs.len());
-                let short: Vec<String> = cs[..max_show]
-                    .iter()
-                    .map(|c| compact_label_path(c))
-                    .collect();
-                let mut s = format!("  ← {}", short.join(" "));
-                if cs.len() > max_show {
-                    s.push_str(&format!(" (+{} more)", cs.len() - max_show));
-                }
-                s
+                // Full caller list, no truncation. Three reviewer rounds
+                // flagged `+N more` as the biggest friction point for
+                // blast-radius queries on high fan-in utilities — the
+                // agent had to grep anyway to recover the tail. Agents
+                // read the map as a file (no token cap); the few extra
+                // KB for a 27-caller list are worth eliminating the
+                // forced grep. Caller paths are architecture labels
+                // (the utility itself is the anchor), so we compact
+                // Gradle source-root boilerplate.
+                let short: Vec<String> = cs.iter().map(|c| compact_label_path(c)).collect();
+                format!("  ← {}", short.join(" "))
             };
             let loc_str = if f.loc > 0 {
                 format!(" loc={}", f.loc)
             } else {
                 String::new()
             };
-            writeln!(b, "U {} (in={}{}){}", f.path, f.in_deg, loc_str, caller_str).unwrap();
+            // When some of the inbound callers are test files, show the
+            // prod-only count. A utility with `in=23 prod=19` is materially
+            // less blast-radius-risky than `in=23 prod=23`.
+            let prod_count = cs
+                .iter()
+                .filter(|c| !test_paths.contains(c.as_str()))
+                .count();
+            let in_str = if (prod_count as u32) < f.in_deg {
+                format!("in={} prod={}", f.in_deg, prod_count)
+            } else {
+                format!("in={}", f.in_deg)
+            };
+            writeln!(b, "U {} ({}{}){}", f.path, in_str, loc_str, caller_str).unwrap();
         }
         b.push('\n');
     }
@@ -429,14 +441,30 @@ fn build_body(
         }
     }
 
+    // Orphans — files nothing imports, with defs, not entry / test / same-
+    // package-peer. Promoted to its own section after two independent
+    // reviewers asked for it (inline `[orphan]` on F records wasn't
+    // scannable). Files also carry the inline tag for cross-reference.
+    let orphans = orphan_files(files, hotspots);
+    if !orphans.is_empty() {
+        let mut sorted = orphans.clone();
+        sorted.sort_by(|a, b| a.path.cmp(&b.path));
+        b.push_str("## Orphans\n");
+        for f in &sorted {
+            let loc_str = if f.loc > 0 {
+                format!(" (loc={})", f.loc)
+            } else {
+                String::new()
+            };
+            writeln!(b, "O {}{}", f.path, loc_str).unwrap();
+        }
+        b.push('\n');
+    }
+
     // Files
-    let scope = opts.scope.trim_start_matches("./").trim_end_matches('/');
     let mut visible: Vec<&FileIndex> = files
         .iter()
         .filter(|f| !f.lang.is_empty() || !f.tags.is_empty())
-        .filter(|f| {
-            scope.is_empty() || f.path == scope || f.path.starts_with(&format!("{}/", scope))
-        })
         .collect();
     if visible.is_empty() {
         return b;
@@ -445,30 +473,8 @@ fn build_body(
 
     b.push_str("## Files\n");
 
-    // Orphan = file with defs that nothing imports AND isn't an entry point
-    // AND isn't a test. Usually dead code worth deleting; cheap to surface,
-    // high signal for cleanup workflows.
-    //
-    // Kotlin exception: files in a package with ≥2 members are suppressed.
-    // Same-package peers can call a declaration without an `import`, and
-    // tingle's syntactic capture misses several routing paths (extension
-    // fns, reflection, manifest/DI wiring). Flagging these as orphans was
-    // the single biggest false-positive source on Android/Kotlin repos —
-    // better to stay silent than make a wrong claim.
-    let entry_paths: std::collections::HashSet<&str> =
-        entries.iter().map(|e| e.path.as_str()).collect();
-    let kotlin_peers = jvm::kotlin_packages_with_peers(files);
-    let orphan_paths: std::collections::HashSet<&str> = visible
-        .iter()
-        .filter(|f| {
-            f.in_deg == 0
-                && !f.defs.is_empty()
-                && !entry_paths.contains(f.path.as_str())
-                && !f.tags.iter().any(|t| t == "test")
-                && !kotlin_peers.contains(&f.package)
-        })
-        .map(|f| f.path.as_str())
-        .collect();
+    let orphan_paths: std::collections::HashSet<&str> =
+        orphans.iter().map(|f| f.path.as_str()).collect();
 
     // Module-grouped F section: group by parent directory, emit `###` per
     // group, render children with basename only. Collapses repeated path
@@ -483,18 +489,18 @@ fn build_body(
         if dir.is_empty() {
             // Repo-root files: no header, render full path.
             for f in children {
-                write_file_line(&mut b, f, &f.path, opts, &orphan_paths);
+                write_file_line(&mut b, f, &f.path, &orphan_paths);
             }
         } else if children.len() == 1 {
             // Singleton group: the `### <dir>` header costs more than it
             // saves. Render the lone file with its full path, no header.
             let f = children[0];
-            write_file_line(&mut b, f, &f.path, opts, &orphan_paths);
+            write_file_line(&mut b, f, &f.path, &orphan_paths);
         } else {
             writeln!(b, "### {}", dir).unwrap();
             for f in children {
                 let name = basename(&f.path);
-                write_file_line(&mut b, f, name, opts, &orphan_paths);
+                write_file_line(&mut b, f, name, &orphan_paths);
             }
         }
     }
@@ -506,7 +512,6 @@ fn write_file_line(
     b: &mut String,
     f: &FileIndex,
     display_name: &str,
-    opts: &Options,
     orphan_paths: &std::collections::HashSet<&str>,
 ) {
     let mut tag_str = String::new();
@@ -544,9 +549,7 @@ fn write_file_line(
         )
     };
     writeln!(b, "F {}{} {}{}", display_name, loc_str, tag_str, imps).unwrap();
-    if opts.full {
-        write_defs(b, &f.defs);
-    }
+    write_defs(b, &f.defs);
 }
 
 fn write_defs(b: &mut String, defs: &[Symbol]) {
@@ -627,7 +630,6 @@ mod tests {
         Options {
             version: "v0".into(),
             gen_date: "2026-04-19".into(),
-            no_legend: true,
             ..Default::default()
         }
     }
@@ -701,72 +703,24 @@ mod tests {
     }
 
     #[test]
-    fn scope_filters_files_section() {
-        let a = FileIndex {
-            path: "core/a.ts".into(),
-            lang: "ts".into(),
-            ..Default::default()
-        };
-        let b = FileIndex {
-            path: "app/b.ts".into(),
-            lang: "ts".into(),
-            ..Default::default()
-        };
-        let opts = Options {
-            version: "v0".into(),
-            gen_date: "2026-04-19".into(),
-            no_legend: true,
-            scope: "core".into(),
-            ..Default::default()
-        };
-        let out = render(
-            &[a, b],
-            &[],
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            &opts,
-        );
-        // Singleton after scope filter → full path.
-        assert!(out.contains("F core/a.ts "), "{}", out);
-        assert!(!out.contains("F app/b.ts"), "{}", out);
-    }
-
-    #[test]
-    fn default_drops_per_file_defs() {
-        // Compact-by-default: F records render path + imports + tags only.
+    fn defs_always_rendered_in_f_section() {
+        // One output shape: F records always include def listings. Used to
+        // be gated on `--full`, which was removed — file-based consumption
+        // has no token cap, so there's no point truncating.
         let f = FileIndex {
             path: "src/a.ts".into(),
             lang: "ts".into(),
             defs: vec![make_def("foo", 5, SymbolKind::Func)],
             ..Default::default()
         };
-        let opts = opts_minimal(); // full = false
+        let opts = opts_minimal();
         let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
         assert!(out.contains("F src/a.ts "), "{}", out);
         assert!(
-            !out.contains(" 5 f foo"),
-            "default mode must not emit defs:\n{}",
+            out.contains(" 5 f foo"),
+            "defs expected on every F:\n{}",
             out
         );
-    }
-
-    #[test]
-    fn full_flag_re_emits_per_file_defs() {
-        let f = FileIndex {
-            path: "src/a.ts".into(),
-            lang: "ts".into(),
-            defs: vec![make_def("foo", 5, SymbolKind::Func)],
-            ..Default::default()
-        };
-        let opts = Options {
-            full: true,
-            ..opts_minimal()
-        };
-        let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
-        assert!(out.contains("F src/a.ts "), "{}", out);
-        assert!(out.contains(" 5 f foo"), "--full must emit defs:\n{}", out);
     }
 
     #[test]
@@ -780,7 +734,18 @@ mod tests {
         };
         let opts = opts_minimal();
         let mut callers = HashMap::new();
-        callers.insert("src/util.ts".into(), vec!["src/a.ts".into()]);
+        // Keep in_deg and caller-count consistent so the new `prod=`
+        // branch doesn't fire (this test is about where defs appear).
+        callers.insert(
+            "src/util.ts".into(),
+            vec![
+                "src/a.ts".into(),
+                "src/b.ts".into(),
+                "src/c.ts".into(),
+                "src/d.ts".into(),
+                "src/e.ts".into(),
+            ],
+        );
         let files = [util];
         let out = render(
             &files,
@@ -895,8 +860,8 @@ mod tests {
             &opts,
         );
         assert!(
-            out.contains("EP src/SettingsViewModel.kt:50 SettingsViewModel (out=11 in=1)"),
-            "expected basename-matching def to be the EP label, got:\n{}",
+            out.contains("H src/SettingsViewModel.kt:50 SettingsViewModel (out=11 in=1)"),
+            "expected basename-matching def to be the Hotspot label, got:\n{}",
             out
         );
     }
@@ -926,7 +891,7 @@ mod tests {
         );
         // file_stem("main.go") = "main" → matches the second def
         assert!(
-            out.contains("EP src/main.go:10 main (out=5 in=0)"),
+            out.contains("H src/main.go:10 main (out=5 in=0)"),
             "{}",
             out
         );
@@ -978,6 +943,162 @@ mod tests {
         assert!(!out.contains("F dead.test.ts [orphan]"), "{}", out);
         // Files without defs aren't orphans (we have no code-presence to call dead).
         assert!(!out.contains("F empty.ts [orphan]"), "{}", out);
+        // Dedicated section surfaces the same file as an O record.
+        assert!(out.contains("## Orphans\n"), "{}", out);
+        assert!(out.contains("O src/dead.ts"), "{}", out);
+        assert!(!out.contains("O src/used.ts"), "{}", out);
+        assert!(!out.contains("O src/dead.test.ts"), "{}", out);
+    }
+
+    #[test]
+    fn utility_shows_prod_count_when_some_callers_are_tests() {
+        // Two reviewers independently flagged test-inflated fan-in.
+        // Result.kt (in=23) actually had 19 prod callers + 4 test. The
+        // U record now shows both: `(in=23 prod=19)`.
+        let util = FileIndex {
+            path: "src/util.ts".into(),
+            lang: "ts".into(),
+            in_deg: 3,
+            ..Default::default()
+        };
+        let prod_caller = FileIndex {
+            path: "src/prod.ts".into(),
+            lang: "ts".into(),
+            ..Default::default()
+        };
+        let test_caller = FileIndex {
+            path: "src/util.test.ts".into(),
+            lang: "ts".into(),
+            tags: vec!["test".into()],
+            ..Default::default()
+        };
+        let another_test = FileIndex {
+            path: "src/other.test.ts".into(),
+            lang: "ts".into(),
+            tags: vec!["test".into()],
+            ..Default::default()
+        };
+        let mut callers: HashMap<String, Vec<String>> = HashMap::new();
+        callers.insert(
+            "src/util.ts".into(),
+            vec![
+                "src/prod.ts".into(),
+                "src/util.test.ts".into(),
+                "src/other.test.ts".into(),
+            ],
+        );
+        let files = [util, prod_caller, test_caller, another_test];
+        let opts = opts_minimal();
+        let out = render(
+            &files,
+            &[],
+            &[&files[0]],
+            &HashMap::new(),
+            &callers,
+            &[],
+            &opts,
+        );
+        assert!(out.contains("U src/util.ts (in=3 prod=1)"), "{}", out);
+    }
+
+    #[test]
+    fn utility_omits_prod_when_no_test_callers() {
+        // If all callers are prod, the `prod=` column is redundant —
+        // keep the record compact.
+        let util = FileIndex {
+            path: "src/util.ts".into(),
+            lang: "ts".into(),
+            in_deg: 2,
+            ..Default::default()
+        };
+        let a = FileIndex {
+            path: "src/a.ts".into(),
+            lang: "ts".into(),
+            ..Default::default()
+        };
+        let b = FileIndex {
+            path: "src/b.ts".into(),
+            lang: "ts".into(),
+            ..Default::default()
+        };
+        let mut callers: HashMap<String, Vec<String>> = HashMap::new();
+        callers.insert(
+            "src/util.ts".into(),
+            vec!["src/a.ts".into(), "src/b.ts".into()],
+        );
+        let files = [util, a, b];
+        let opts = opts_minimal();
+        let out = render(
+            &files,
+            &[],
+            &[&files[0]],
+            &HashMap::new(),
+            &callers,
+            &[],
+            &opts,
+        );
+        assert!(out.contains("U src/util.ts (in=2)"), "{}", out);
+        // Legend always documents `prod=`, but the U record itself
+        // shouldn't carry it when every caller is prod.
+        let u_section_start = out.find("## Utilities").expect("Utilities section");
+        let u_section = &out[u_section_start..];
+        assert!(
+            !u_section.contains("prod="),
+            "U record leaked prod=:\n{}",
+            u_section
+        );
+    }
+
+    #[test]
+    fn utility_shows_full_caller_list_uncapped() {
+        // Three reviewer rounds flagged `+N more` as the biggest blast-radius
+        // friction. The cap is gone — all callers appear inline.
+        let util = FileIndex {
+            path: "src/util.ts".into(),
+            lang: "ts".into(),
+            in_deg: 15,
+            ..Default::default()
+        };
+        let mut callers: HashMap<String, Vec<String>> = HashMap::new();
+        let caller_paths: Vec<String> = (0..15).map(|i| format!("src/caller{}.ts", i)).collect();
+        callers.insert("src/util.ts".into(), caller_paths.clone());
+        let files = [util];
+        let opts = opts_minimal();
+        let out = render(
+            &files,
+            &[],
+            &[&files[0]],
+            &HashMap::new(),
+            &callers,
+            &[],
+            &opts,
+        );
+        for c in &caller_paths {
+            assert!(
+                out.contains(c),
+                "caller {} missing from output:\n{}",
+                c,
+                out
+            );
+        }
+        assert!(!out.contains("more)"), "truncation leaked:\n{}", out);
+    }
+
+    #[test]
+    fn no_orphans_section_when_none() {
+        // When nothing qualifies, neither the section nor the legend entry
+        // appears.
+        let f = FileIndex {
+            path: "src/a.ts".into(),
+            lang: "ts".into(),
+            in_deg: 1, // not orphan
+            defs: vec![make_def("foo", 1, SymbolKind::Func)],
+            ..Default::default()
+        };
+        let opts = opts_minimal();
+        let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
+        assert!(!out.contains("## Orphans"), "{}", out);
+        assert!(!out.contains("O=orphan"), "{}", out);
     }
 
     #[test]
@@ -989,10 +1110,7 @@ mod tests {
             defs: vec![make_def("foo", 1, SymbolKind::Func)],
             ..Default::default()
         };
-        let opts = Options {
-            no_legend: false,
-            ..opts_minimal()
-        };
+        let opts = opts_minimal();
         let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
         assert!(out.contains("F src/big.ts (378)"), "{}", out);
         // Legend advertises `(N=loc)` so agents know the parens are a count.
@@ -1009,10 +1127,7 @@ mod tests {
             defs: vec![make_def("foo", 1, SymbolKind::Func)],
             ..Default::default()
         };
-        let opts = Options {
-            no_legend: false,
-            ..opts_minimal()
-        };
+        let opts = opts_minimal();
         let out = render(&[f], &[], &[], &HashMap::new(), &HashMap::new(), &[], &opts);
         assert!(!out.contains("(0)"), "{}", out);
         // Legend falls back to plain `F=file` when no file has a LOC.
@@ -1021,11 +1136,12 @@ mod tests {
     }
 
     #[test]
-    fn kotlin_package_peers_suppress_orphan_tag() {
-        // Two Kotlin files share `com.ex.feature`. Neither imports the other,
-        // so both have in_deg == 0 even though they may call each other via
-        // same-package resolution (which tingle can't always see). Conservative
-        // policy: don't tag either as orphan.
+    fn kotlin_files_with_zero_indeg_are_orphan_even_with_peers() {
+        // If `resolve::all` captured same-package refs and the file STILL
+        // has in_deg == 0, no peer references it. The earlier "peer
+        // exemption" was a crutch from when we didn't capture refs — it
+        // silenced genuinely-dead files like `FeedMockData.kt`, which
+        // reviewers correctly identified as orphans.
         let a = FileIndex {
             path: "app/src/main/java/com/ex/feature/ScreenA.kt".into(),
             ext: ".kt".into(),
@@ -1044,19 +1160,9 @@ mod tests {
             defs: vec![make_def("ScreenB", 1, SymbolKind::Class)],
             ..Default::default()
         };
-        // A lonely file in its own package is still orphan-eligible.
-        let lonely = FileIndex {
-            path: "app/src/main/java/com/ex/lonely/Solo.kt".into(),
-            ext: ".kt".into(),
-            lang: "kt".into(),
-            package: "com.ex.lonely".into(),
-            in_deg: 0,
-            defs: vec![make_def("Solo", 1, SymbolKind::Class)],
-            ..Default::default()
-        };
         let opts = opts_minimal();
         let out = render(
-            &[a, b, lonely],
+            &[a, b],
             &[],
             &[],
             &HashMap::new(),
@@ -1064,9 +1170,46 @@ mod tests {
             &[],
             &opts,
         );
-        assert!(!out.contains("ScreenA.kt [orphan]"), "{}", out);
-        assert!(!out.contains("ScreenB.kt [orphan]"), "{}", out);
-        assert!(out.contains("Solo.kt [orphan]"), "{}", out);
+        // Both files have package peers, but neither has a ref edge from
+        // the peer — so both are orphan-tagged.
+        assert!(out.contains("O app/src/main/java/com/ex/feature/ScreenA.kt"));
+        assert!(out.contains("O app/src/main/java/com/ex/feature/ScreenB.kt"));
+    }
+
+    #[test]
+    fn kotlin_file_referenced_by_peer_not_orphan() {
+        // ScreenA references ScreenB via the same-package resolver —
+        // ScreenB's in_deg == 1, so only ScreenA shows as orphan.
+        let a = FileIndex {
+            path: "app/src/main/java/com/ex/feature/ScreenA.kt".into(),
+            ext: ".kt".into(),
+            lang: "kt".into(),
+            package: "com.ex.feature".into(),
+            in_deg: 0,
+            defs: vec![make_def("ScreenA", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        let b = FileIndex {
+            path: "app/src/main/java/com/ex/feature/ScreenB.kt".into(),
+            ext: ".kt".into(),
+            lang: "kt".into(),
+            package: "com.ex.feature".into(),
+            in_deg: 1,
+            defs: vec![make_def("ScreenB", 1, SymbolKind::Class)],
+            ..Default::default()
+        };
+        let opts = opts_minimal();
+        let out = render(
+            &[a, b],
+            &[],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &opts,
+        );
+        assert!(out.contains("O app/src/main/java/com/ex/feature/ScreenA.kt"));
+        assert!(!out.contains("O app/src/main/java/com/ex/feature/ScreenB.kt"));
     }
 
     #[test]
@@ -1125,13 +1268,13 @@ mod tests {
             &opts,
         );
         assert!(
-            out.contains("EP src/Manager.kt:1 Manager (out=8 in=5) [hub]"),
-            "Manager EP record should be marked [hub]:\n{}",
+            out.contains("H src/Manager.kt:1 Manager (out=8 in=5) [hub]"),
+            "Manager H record should be marked [hub]:\n{}",
             out
         );
         assert!(
-            out.contains("EP src/Main.kt:1 Main (out=10 in=0)\n"),
-            "Pure EP record (no utility overlap) should NOT be marked:\n{}",
+            out.contains("H src/Main.kt:1 Main (out=10 in=0)\n"),
+            "Pure H record (no utility overlap) should NOT be marked:\n{}",
             out
         );
     }
