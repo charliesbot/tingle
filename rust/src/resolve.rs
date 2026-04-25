@@ -100,12 +100,13 @@ pub fn all(files: &mut [FileIndex], aliases: &Aliases) {
             }
         }
 
-        // Vue template refs: `<Foo />` in a `<template>` block resolves to
+        // Vue template refs + Markdown component refs: `<Foo />` in a
+        // `<template>` block (or in a `.md` / `.mdx` body) resolves to
         // `components/Foo.vue` via Nuxt / unplugin-vue-components
-        // auto-registration. Without this backfill, Vue projects that rely
-        // on auto-import look entirely orphan — the reviewer-dropped
-        // Slidev repo is the canonical failure mode.
-        if vue::is_vue_ext(&f.ext) {
+        // auto-registration. Without this backfill, Vue projects that
+        // rely on auto-import look entirely orphan — the Slidev repo
+        // is the canonical failure mode for the markdown half.
+        if vue::is_vue_ext(&f.ext) || vue::is_markdown_ext(&f.ext) {
             for r in &f.refs {
                 if let Some(path) = vue_index.get(r) {
                     if path != &from {
@@ -521,6 +522,49 @@ mod tests {
         }];
         all(&mut files, &HashMap::new());
         assert!(files[0].resolved_imports.is_empty());
+    }
+
+    #[test]
+    fn markdown_template_refs_resolve_to_vue_components() {
+        // Slidev case: slides.md references `<Badge />` and `<Callout />`
+        // with no import. Both must resolve to .vue files via the same
+        // component index used for .vue → .vue resolution.
+        let mut files = vec![
+            FileIndex {
+                path: "slides.md".into(),
+                ext: ".md".into(),
+                lang: "md".into(),
+                refs: vec!["Badge".into(), "Callout".into(), "Unknown".into()],
+                ..Default::default()
+            },
+            vue("components/Badge.vue"),
+            vue("components/Callout.vue"),
+        ];
+        all(&mut files, &HashMap::new());
+        assert!(files[0]
+            .resolved_imports
+            .contains(&"components/Badge.vue".to_string()));
+        assert!(files[0]
+            .resolved_imports
+            .contains(&"components/Callout.vue".to_string()));
+        // Unknown components (framework built-ins, typos) silently drop.
+        assert_eq!(files[0].resolved_imports.len(), 2);
+    }
+
+    #[test]
+    fn mdx_template_refs_also_resolve() {
+        let mut files = vec![
+            FileIndex {
+                path: "docs/intro.mdx".into(),
+                ext: ".mdx".into(),
+                lang: "mdx".into(),
+                refs: vec!["Badge".into()],
+                ..Default::default()
+            },
+            vue("components/Badge.vue"),
+        ];
+        all(&mut files, &HashMap::new());
+        assert_eq!(files[0].resolved_imports, vec!["components/Badge.vue"]);
     }
 
     #[test]

@@ -283,6 +283,25 @@ pub fn all(repo: &Path, files: &mut [FileIndex], stats: &Stats) {
             return;
         }
 
+        // Markdown / MDX: scan body for `<PascalCase />` component refs
+        // (Slidev / VuePress / VitePress / Nuxt content / Vue-flavored
+        // MDX). Resolves to `.vue` files via the component index in
+        // `resolve.rs`. Code fences and inline code are stripped to
+        // avoid false positives from embedded examples.
+        if crate::lang::vue::is_markdown_ext(&f.ext) {
+            let full = repo.join(&f.path);
+            let Ok(data) = std::fs::read(&full) else {
+                stats.read_errors.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            f.loc = count_lines(&data);
+            f.lang = if f.ext == ".mdx" { "mdx" } else { "md" }.to_string();
+            let src = std::str::from_utf8(&data).unwrap_or("");
+            f.refs = crate::lang::vue::extract_markdown_component_refs(src);
+            stats.parsed_ok.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
         // AndroidManifest.xml gets first-class treatment — it declares
         // runtime entry points (Activities/Services/etc.) that the
         // import-based graph can't see otherwise. Not tree-sitter-driven

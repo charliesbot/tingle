@@ -175,6 +175,32 @@ fn vue_sfc_extracts_script_imports_and_template_refs() {
 }
 
 #[test]
+fn markdown_extracts_component_refs() {
+    // slides.md exercises Slidev frontmatter, fenced code, inline code,
+    // HTML comments, and dedup. The `Badge`, `Callout`, `Spacer` refs
+    // must surface; the fenced/commented/inline-coded names must not.
+    let f = run("slides.md", ".md");
+    assert_eq!(f.lang, "md");
+    assert!(f.loc > 0, "loc not populated");
+    for want in ["Badge", "Callout", "Spacer"] {
+        assert!(
+            f.refs.iter().any(|r| r == want),
+            "missing ref {}, got: {:?}",
+            want,
+            f.refs
+        );
+    }
+    for forbidden in ["NotARealRef", "Hidden"] {
+        assert!(
+            !f.refs.iter().any(|r| r == forbidden),
+            "false-positive ref {}, got: {:?}",
+            forbidden,
+            f.refs
+        );
+    }
+}
+
+#[test]
 fn python_util_includes_read_lines() {
     // Canonical C tree-sitter captures top-level defs after an f-string method
     // body (gotreesitter did not). `read_lines` is required.
