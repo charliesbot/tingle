@@ -30,6 +30,14 @@ pub fn is_vue_ext(ext: &str) -> bool {
     ext == ".vue"
 }
 
+/// True for markdown extensions that may carry inline `<PascalCase />`
+/// component references — Slidev / VuePress / VitePress / Nuxt content
+/// for `.md`, MDX-style component embedding for `.mdx`. React MDX is out
+/// of scope (the resolver only matches against the Vue component index).
+pub fn is_markdown_ext(ext: &str) -> bool {
+    matches!(ext, ".md" | ".mdx")
+}
+
 /// Sections extracted from a Vue SFC. Missing sections come back empty.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SfcSections {
@@ -110,6 +118,23 @@ pub fn extract_template_refs(template: &str) -> Vec<String> {
     out
 }
 
+/// Extract PascalCase component references from a Markdown / MDX file.
+///
+/// Strips fenced code blocks, inline code spans, and HTML comments
+/// before scanning, so embedded examples (a `<Badge />` shown verbatim
+/// in docs, a fenced code sample, or a commented-out tag) don't fire
+/// false positives. The remaining content is fed to
+/// `extract_template_refs`.
+pub fn extract_markdown_component_refs(src: &str) -> Vec<String> {
+    static FENCE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)```.*?```").unwrap());
+    static INLINE_CODE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`[^`\n]*`").unwrap());
+    static COMMENT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<!--.*?-->").unwrap());
+    let stripped = FENCE_RE.replace_all(src, "");
+    let stripped = INLINE_CODE_RE.replace_all(&stripped, "");
+    let stripped = COMMENT_RE.replace_all(&stripped, "");
+    extract_template_refs(&stripped)
+}
+
 /// Derive a Vue component name from a `.vue` file path. Returns `None`
 /// if the filename stem doesn't start with an uppercase letter.
 ///
@@ -154,6 +179,79 @@ mod tests {
         assert!(is_vue_ext(".vue"));
         assert!(!is_vue_ext(".ts"));
         assert!(!is_vue_ext(""));
+    }
+
+    #[test]
+    fn is_markdown_ext_recognizes_md_and_mdx() {
+        assert!(is_markdown_ext(".md"));
+        assert!(is_markdown_ext(".mdx"));
+        assert!(!is_markdown_ext(".markdown"));
+        assert!(!is_markdown_ext(".vue"));
+        assert!(!is_markdown_ext(""));
+    }
+
+    #[test]
+    fn extract_markdown_refs_strips_fenced_code() {
+        let src = r#"# Title
+
+<Badge label="hi" />
+
+```vue
+<NotARealRef />
+```
+
+<Callout>see above</Callout>
+"#;
+        let refs = extract_markdown_component_refs(src);
+        assert!(refs.contains(&"Badge".to_string()));
+        assert!(refs.contains(&"Callout".to_string()));
+        assert!(
+            !refs.contains(&"NotARealRef".to_string()),
+            "fenced code leaked: {:?}",
+            refs
+        );
+    }
+
+    #[test]
+    fn extract_markdown_refs_strips_inline_code() {
+        let src = "Use `<Badge />` like this: <Callout />.";
+        let refs = extract_markdown_component_refs(src);
+        assert!(refs.contains(&"Callout".to_string()));
+        assert!(
+            !refs.contains(&"Badge".to_string()),
+            "inline code leaked: {:?}",
+            refs
+        );
+    }
+
+    #[test]
+    fn extract_markdown_refs_strips_html_comments() {
+        let src = "<!-- <Hidden /> --> <Visible />";
+        let refs = extract_markdown_component_refs(src);
+        assert_eq!(refs, vec!["Visible"]);
+    }
+
+    #[test]
+    fn extract_markdown_refs_handles_slidev_separators() {
+        // Slidev separates slides with `---` lines. Frontmatter has no
+        // tags. Component refs across slides should all surface.
+        let src = r#"---
+layout: cover
+---
+
+# Slide 1
+<Badge />
+
+---
+layout: section
+---
+
+# Slide 2
+<Callout />
+"#;
+        let refs = extract_markdown_component_refs(src);
+        assert!(refs.contains(&"Badge".to_string()));
+        assert!(refs.contains(&"Callout".to_string()));
     }
 
     #[test]
