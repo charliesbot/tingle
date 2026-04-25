@@ -147,6 +147,34 @@ fn cpp_reader() {
 }
 
 #[test]
+fn vue_sfc_extracts_script_imports_and_template_refs() {
+    // Page.vue: explicit `import Badge from './Badge.vue'` in `<script>`
+    // and a `<Callout />` ref in `<template>` with no import (auto-
+    // registered, Nuxt/unplugin-vue-components style).
+    let f = run("Page.vue", ".vue");
+    assert_eq!(f.lang, "vue");
+    // Script block delivered to the TS grammar — `./Badge.vue` lands in
+    // the import list verbatim.
+    assert!(
+        f.imports.iter().any(|i| i == "./Badge.vue"),
+        "missing ./Badge.vue import, got: {:?}",
+        f.imports
+    );
+    // Template refs (pascal-case tags) populate `refs`, not `imports`.
+    assert!(
+        f.refs.iter().any(|r| r == "Badge"),
+        "missing Badge template ref, got: {:?}",
+        f.refs
+    );
+    assert!(
+        f.refs.iter().any(|r| r == "Callout"),
+        "missing Callout template ref, got: {:?}",
+        f.refs
+    );
+    assert!(f.loc > 0, "loc not populated");
+}
+
+#[test]
 fn python_util_includes_read_lines() {
     // Canonical C tree-sitter captures top-level defs after an f-string method
     // body (gotreesitter did not). `read_lines` is required.
